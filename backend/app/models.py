@@ -42,51 +42,6 @@ class Position:
 
 
 @dataclass
-class Signal:
-    """Aggregated view of what the followed traders hold in one market."""
-
-    market_key: str
-    asset_class: str
-    symbol: str
-    title: str
-    direction: str
-    price_key: str
-    conviction: float  # score-weighted support for `direction` minus support for the other side
-    agreement: float  # share of total weighted support on `direction` (0..1)
-    n_traders: int
-    n_opposing: int
-    total_size_usd: float
-    avg_entry: float
-    mark_price: float
-    move_since_entry: float  # signed so positive = holders are in profit
-    sources: list[str] = field(default_factory=list)
-    url: str | None = None
-
-
-@dataclass
-class Positioning:
-    """How an exchange's top traders are positioned on one coin."""
-
-    exchange: str
-    symbol: str
-    long_share: float  # 0..1 share of top-trader positions that are long
-    long_share_24h: float | None  # same, 24h ago
-    funding: float | None = None  # current funding rate per 8h (fraction)
-
-    @property
-    def change_24h(self) -> float | None:
-        return None if self.long_share_24h is None else self.long_share - self.long_share_24h
-
-
-@dataclass
-class Flow:
-    """Followed traders entering and leaving one side of a market in the last 24h."""
-
-    buyers: int = 0
-    sellers: int = 0
-
-
-@dataclass
 class Check:
     name: str
     passed: bool
@@ -95,12 +50,12 @@ class Check:
 
 @dataclass
 class Pick:
-    """A concrete spot trade suggestion: buy `size_usd` of `symbol` on your exchange."""
+    """A concrete spot trade suggestion: buy `size_usd` of `symbol` on your exchange (a swing copy, swing.py)."""
 
     market_key: str
     symbol: str
     pair: str  # OKX spot pair, e.g. DOGE-USDT
-    strength: str  # "Strong" (3 of 3 checks) | "Good" (2 of 3)
+    strength: str  # "Copy"
     score: float  # ranking only
     checks: list[Check]
     price: float  # exchange spot price now
@@ -119,7 +74,6 @@ class Pick:
     sellers_24h: int
     notes: list[str] = field(default_factory=list)
     sources: list[str] = field(default_factory=list)
-    trail_pct: float | None = None  # pump rides: trailing stop distance below the highest price since buying
     features: dict = field(default_factory=dict)  # numeric inputs behind the pick, recorded for learning
 
     @property

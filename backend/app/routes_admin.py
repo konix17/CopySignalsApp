@@ -1,13 +1,12 @@
-"""Admin panel API: users, sessions, audit log, system status, app settings, strategy lab. Admins only."""
+"""Admin panel API: users, sessions, audit log, system status, app settings. Admins only."""
 
-import asyncio
 import os
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from . import app_settings, db, replay, users
+from . import app_settings, users
 from .logs import audit
 from .web import Ctx, client_ip, ctx, require_admin
 
@@ -155,7 +154,6 @@ async def system_status(admin: users.User = Depends(require_admin), c: Ctx = Dep
     return {
         "sources": [dict(r) for r in c.conn.execute("SELECT * FROM source_status ORDER BY source")],
         "refreshing": c.pipeline.running, "live_at": c.pipeline.live_at, "stream": c.pipeline.stream.status(),
-        "scan_at": c.pipeline.scan_at or int(db.get_pref(c.conn, "scan_at", "0")) or None,
         "db_bytes": size,
         "counts": {
             "users": one("SELECT COUNT(*) FROM users"),
@@ -163,8 +161,8 @@ async def system_status(admin: users.User = Depends(require_admin), c: Ctx = Dep
             "followed_traders": one("SELECT COUNT(DISTINCT source || address) FROM trader_stats WHERE followed = 1"),
             "open_demo_trades": one("SELECT COUNT(*) FROM my_positions WHERE source = 'demo' AND status = 'open'"),
             "open_real_positions": one("SELECT COUNT(*) FROM my_positions WHERE source != 'demo' AND status = 'open'"),
-            "tracked_picks_open": one("SELECT COUNT(*) FROM pick_trades WHERE status = 'open'"),
-            "tracked_picks_closed": one("SELECT COUNT(*) FROM pick_trades WHERE status = 'closed'"),
+            "tracked_copies_open": one("SELECT COUNT(*) FROM pick_trades WHERE status = 'open' AND style = 'copy'"),
+            "tracked_copies_closed": one("SELECT COUNT(*) FROM pick_trades WHERE status = 'closed' AND style = 'copy'"),
         },
         "security": {
             "alerts_24h": one("SELECT COUNT(*) FROM audit_log WHERE level = 'alert' AND ts >= ?", now - 86400),
@@ -196,25 +194,3 @@ async def put_app_settings(body: SettingChange, request: Request, admin: users.U
     audit(c.conn, "admin.settings_changed", user_id=admin.id, username=admin.username, ip=client_ip(request),
           detail=body.values)
     return app_settings.all_values(c.conn)
-
-
-# --- strategy lab ------------------------------------------------------------------------------
-
-_lab_lock = asyncio.Lock()
-
-
-@router.get("/lab")
-async def get_lab(admin: users.User = Depends(require_admin), c: Ctx = Depends(ctx)):
-    return {"running": _lab_lock.locked(), "result": replay.load(c.conn)}
-
-
-@router.post("/lab")
-async def run_lab(request: Request, admin: users.User = Depends(require_admin), c: Ctx = Depends(ctx)):
-    """Replay the recorded paper trades under each exit rule (fetches OKX price history, about a minute)."""
-    if _lab_lock.locked():
-        raise HTTPException(409, "The replay is already running.")
-    async with _lab_lock:
-        result = await replay.run(c.conn, c.settings.okx_region)
-    replay.save(c.conn, result)
-    audit(c.conn, "admin.lab_run", user_id=admin.id, username=admin.username, ip=client_ip(request))
-    return {"running": False, "result": result}

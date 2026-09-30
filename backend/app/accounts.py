@@ -11,7 +11,7 @@ Each sync:
 3. Works out each holding's average cost from its trades and whether a
    stop-loss order protects it.
 4. Reconciles "My portfolio": coins you buy appear automatically (with the plan
-   of the pick that was live when you bought), positions you've sold close at
+   of the swing copy that was live when you bought), positions you've sold close at
    your actual sell price with your real fees, and mismatches are flagged.
 
 The OKX reader turns OKX's API into the normalized shapes in `Snapshot`;
@@ -37,7 +37,7 @@ from .market import OKX_DOMAINS, STABLES, Market
 log = logging.getLogger(__name__)
 DUST_USD = 10.0  # holdings worth less than this are ignored
 DEFAULT_FEE = 0.001
-SPREAD_SLIPPAGE = 0.001  # rough round-trip spread + slippage when there's no pick estimate
+SPREAD_SLIPPAGE = 0.001  # rough round-trip spread + slippage when there's no copy estimate
 
 
 class UnsafeKeyError(RuntimeError):
@@ -209,7 +209,7 @@ class ExchangeAccount:
                                  (self.uid,)).fetchall()
         open_by_coin = {r["symbol"]: r for r in open_rows}
 
-        # Holdings not yet tracked -> start tracking with the plan of the pick live at buy time.
+        # Holdings not yet tracked -> start tracking with the plan of the swing copy live at buy time.
         for coin, h in held.items():
             if coin in open_by_coin:
                 continue
@@ -217,11 +217,11 @@ class ExchangeAccount:
             opened = h.opened_at or now
             plan = conn.execute(
                 "SELECT stop_price, target_price, hold_until, traders_at_entry, entry_price, cost_pct, style, trail_pct, "
-                "strength, features FROM pick_trades WHERE symbol = ? AND opened_at <= ? + 3600 "
+                "strength, features FROM pick_trades WHERE symbol = ? AND style = 'copy' AND opened_at <= ? + 3600 "
                 "AND (closed_at IS NULL OR closed_at >= ?) ORDER BY opened_at DESC LIMIT 1",
                 (coin, opened, opened)).fetchone()
             plan_dict = None
-            if plan:  # re-base the pick's stop/target percentages on your actual entry
+            if plan:  # re-base the copy's stop/target percentages on your actual entry
                 ratio = entry / plan["entry_price"]
                 plan_dict = {"stop_price": plan["stop_price"] * ratio, "target_price": plan["target_price"] * ratio,
                              "hold_until": plan["hold_until"], "traders_at_entry": plan["traders_at_entry"],
@@ -261,7 +261,7 @@ class ExchangeAccount:
                 updates["stop_order_kind"] = stop["stop_kind"] if protected else None
                 conn.execute(f"UPDATE my_positions SET {', '.join(f'{k} = ?' for k in updates)} WHERE id = ?",
                              (*updates.values(), pos["id"]))
-                if not protected and pos["traders_at_entry"]:  # only for positions that follow a pick
+                if not protected and pos["traders_at_entry"]:  # only for positions that follow a copy
                     portfolio.raise_alert(conn, pos, "no_stop_order", "WATCH",
                                           f"No stop-loss order on {self.label}. Place a stop sell at {pos['stop_price']:.6g}", now)
 

@@ -38,18 +38,10 @@ class Market:
         mid = (self.bid + self.ask) / 2
         return (self.ask - self.bid) / mid if mid else 1.0
 
-    @property
-    def has_trend_data(self) -> bool:
-        return self.ma50 is not None
 
-    @property
-    def trend_checks(self) -> tuple[bool, bool, bool]:
-        """(above 20-day average, above 50-day average, up over 30 days)."""
-        return (
-            self.ma20 is not None and self.price > self.ma20,
-            self.ma50 is not None and self.price > self.ma50,
-            self.ret30 is not None and self.ret30 > 0,
-        )
+def round_trip_cost(market: Market, fee_rate: float, slippage: float) -> float:
+    """Buy and sell: fee + half the spread + slippage, each way."""
+    return 2 * (fee_rate + market.spread / 2 + slippage)
 
 
 def trend_from_closes(closes: list[float]) -> tuple[float | None, float | None, float | None, float | None]:
@@ -152,21 +144,6 @@ class OkxSpot:
         rows = await self._get(client, "/api/v5/market/tickers", {"instType": "SPOT"})
         return {r["instId"]: float(r["last"]) for r in rows if r["instId"] in wanted and r["last"]}
 
-    async def windows(self, client: httpx.AsyncClient, pairs: list[str]) -> tuple[dict, dict]:
-        """OKX has no multi-coin rolling ticker, so read the last hour of 1-minute candles per coin."""
-        results = await gather_limited([self._candles(client, p, "1m", 60) for p in pairs], limit=8)
-        w15, w60 = {}, {}
-        for pair, rows in zip(pairs, results):
-            if isinstance(rows, BaseException) or len(rows) < 15:
-                continue
-            last = float(rows[-1][4])
-            recent = rows[-15:]
-            w15[pair] = {"open": float(recent[0][1]), "high": max(float(r[2]) for r in recent), "last": last,
-                         "quote_volume": sum(float(r[7]) for r in recent)}
-            w60[pair] = {"open": float(rows[0][1]), "high": max(float(r[2]) for r in rows), "last": last,
-                         "quote_volume": sum(float(r[7]) for r in rows)}
-        return w15, w60
-
     async def history(self, client: httpx.AsyncClient, pair: str, bar: str, start: int, end: int,
                       pacer: Pacer) -> list[tuple]:
         """Candles from `start` to `end` (seconds), oldest first, as (open time in seconds, open, high, low, close,
@@ -194,10 +171,3 @@ class OkxSpot:
                 break
             after = oldest * 1000
         return [rows[t] for t in sorted(rows) if t >= start]
-
-    async def high_before(self, client: httpx.AsyncClient, pair: str, days: int = 7) -> float | None:
-        rows = (await self._candles(client, pair, "1H", days * 24 + 1))[:-1]
-        return max(float(r[2]) for r in rows) if rows else None
-
-    async def candles_5m(self, client: httpx.AsyncClient, pair: str, hours: int = 3) -> list[list]:
-        return await self._candles(client, pair, "5m", hours * 12)

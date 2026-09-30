@@ -8,11 +8,10 @@ import sqlite3
 from . import db
 
 SPEC: dict[str, tuple[float, float, float, str]] = {
-    "refresh_minutes": (10, 2, 60, "How often leaderboards, crowding and trends are refreshed (minutes); "
-                                   "positions, prices, picks and accounts update every minute"),
+    "refresh_minutes": (10, 2, 60, "How often leaderboards and trader drawdowns are refreshed (minutes); "
+                                   "positions, prices, swing copies and accounts update every minute"),
     "default_bankroll": (1000, 10, 100_000_000, "Bankroll for users without a connected OKX balance ($)"),
     "default_demo_balance": (10_000, 100, 100_000_000, "Starting balance of a new or reset demo account ($)"),
-    "default_risk_budget_pct": (0.10, 0, 0.5, "High-risk budget as a share of the bankroll, unless a user sets one"),
 }
 
 

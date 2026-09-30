@@ -1,5 +1,5 @@
-"""The app's own API: picks, rising now, portfolio (real and demo), the trend bot, alerts, settings. Everything here is scoped
-to the logged-in user; shared market data is the same for everyone."""
+"""The app's own API: swing copies, portfolio (real and demo), the trend bot, alerts, settings. Everything here is
+scoped to the logged-in user; shared market data is the same for everyone."""
 
 import asyncio
 import dataclasses
@@ -11,7 +11,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 
-from . import app_settings, autotrade, db, movers, portfolio, pumps, tracker, trendbot, users
+from . import app_settings, autotrade, db, portfolio, tracker, trendbot, users
 from .accounts import OkxAccount, UnsafeKeyError
 from .logs import audit
 from .pipeline import account_status, bankroll_info, market_view, reference_bankroll, user_fee
@@ -35,16 +35,9 @@ def _open_symbols(c: Ctx, user_id: int, demo: bool) -> set[str]:
         (user_id,))}
 
 
-def _pick_out(c: Ctx, p, user_id: int, held: set[str], demo: set[str]) -> dict:
+def _copy_out(c: Ctx, p, user_id: int, held: set[str], demo: set[str]) -> dict:
     return asdict(p) | {"held": p.symbol in held, "demo_running": p.symbol in demo, "trade_url": _trade_url(c, p.symbol),
                         "qty": p.size_usd / p.price if p.price else None}
-
-
-def _rescaled(p, size: float):
-    """A copy of a shared rising-now pick resized for one user's high-risk budget."""
-    factor = size / p.size_usd if p.size_usd else 0
-    return type(p)(**{**asdict(p), "checks": p.checks, "size_usd": size,
-                      "net_win_usd": round(p.net_win_usd * factor, 2), "net_loss_usd": round(p.net_loss_usd * factor, 2)})
 
 
 # --- status ------------------------------------------------------------------------
@@ -83,51 +76,22 @@ async def refresh(user: users.User = Depends(current_user), c: Ctx = Depends(ctx
     return {"started": True}
 
 
-# --- picks -------------------------------------------------------------------------
+# --- swing copies -------------------------------------------------------------------
 
-@router.get("/picks")
-async def picks(user: users.User = Depends(current_user), c: Ctx = Depends(ctx)):
+@router.get("/copies")
+async def copies(user: users.User = Depends(current_user), c: Ctx = Depends(ctx)):
     view = market_view(c.conn, c.settings, _now(), user.id)
     held, demo = _open_symbols(c, user.id, False), _open_symbols(c, user.id, True)
     return {
         "regime": view.regime,
         "bankroll": view.bankroll,
-        "picks": [_pick_out(c, p, user.id, held, demo) for p in view.picks],
-        "copies": [_pick_out(c, p, user.id, held, demo) for p in view.copies],
-        "exiting": view.exiting,
+        "copies": [_copy_out(c, p, user.id, held, demo) for p in view.copies],
     }
 
 
-def _user_movers(c: Ctx, user_id: int, now: int):
-    rising, earlier, info = movers.load(c.conn, now)
-    bank = bankroll_info(c.conn, c.settings, now, user_id)
-    size = movers.risky_size(bank["risk_budget"], bank["risk_budget_free"], c.settings.risky_trade_share)
-    return [_rescaled(p, size) for p in rising], earlier, info, bank
-
-
-@router.get("/movers")
-async def rising(user: users.User = Depends(current_user), c: Ctx = Depends(ctx)):
-    now = _now()
-    rising_now, earlier, info, bank = _user_movers(c, user.id, now)
-    states = pumps.phases(c.conn, now=now)
-    held, demo = _open_symbols(c, user.id, False), _open_symbols(c, user.id, True)
-    return {
-        "scanned_at": c.pipeline.scan_at or int(db.get_pref(c.conn, "scan_at", "0")) or None,
-        "budget": {k: bank[k] for k in ("amount", "risk_budget", "risk_budget_used", "risk_budget_free")}
-                  | {"per_trade": bank["risk_budget"] * c.settings.risky_trade_share},
-        "rising": [_pick_out(c, p, user.id, held, demo) | {"flag": info[p.symbol], "pump": states.get(p.symbol)}
-                   for p in rising_now],
-        "avoid": sorted((s for s in states.values() if s["phase"] in ("topping", "dumping")), key=lambda s: s["from_peak"]),
-        "earlier": [e | {"pump": states.get(e["symbol"])} for e in earlier],
-    }
-
-
-def _find_pick(c: Ctx, user_id: int, symbol: str, view):
-    """A current pick or a coin flagged as rising now, sized for this user."""
-    pick = next((p for p in [*view.picks, *view.copies] if p.symbol == symbol), None)
-    if pick is None:
-        pick = next((p for p in _user_movers(c, user_id, _now())[0] if p.symbol == symbol), None)
-    return pick
+def _find_copy(view, symbol: str):
+    """A current swing copy, sized for the user `view` was built for."""
+    return next((p for p in view.copies if p.symbol == symbol), None)
 
 
 # --- positions (real) --------------------------------------------------------------
@@ -182,7 +146,7 @@ async def add_position(body: NewPosition, request: Request, user: users.User = D
                        c: Ctx = Depends(ctx)):
     now = _now()
     view = market_view(c.conn, c.settings, now, user.id)
-    pick = _find_pick(c, user.id, body.symbol, view)
+    pick = _find_copy(view, body.symbol)
     if not pick and body.symbol not in view.markets:
         raise HTTPException(404, "Unknown coin.")
     btc = view.markets.get("BTC")
@@ -251,7 +215,7 @@ async def account_sync(request: Request, user: users.User = Depends(current_user
     async with httpx.AsyncClient(timeout=30) as client:
         status = await c.pipeline.sync_account(client, user.id, now)
     view = c.pipeline.last_view or market_view(c.conn, c.settings, now)
-    portfolio.update_positions(c.conn, view.signals, view.positioning, view.markets, now)
+    portfolio.update_positions(c.conn, view.markets, now)
     return {"status": status}
 
 
@@ -264,12 +228,12 @@ class DemoBuy(BaseModel):
 
 @router.post("/demo")
 async def demo_buy(body: DemoBuy, request: Request, user: users.User = Depends(current_user), c: Ctx = Depends(ctx)):
-    """Buy a current pick with pretend money at the OKX price now, following the pick's plan."""
+    """Buy a current swing copy with pretend money at the OKX price now, following the copy's plan."""
     now = _now()
     view = market_view(c.conn, c.settings, now, user.id)
-    pick = _find_pick(c, user.id, body.symbol, view)
+    pick = _find_copy(view, body.symbol)
     if not pick:
-        raise HTTPException(404, f"{body.symbol} is no longer a pick or rising right now.")
+        raise HTTPException(404, f"{body.symbol} is no longer a swing copy.")
     if body.symbol in _open_symbols(c, user.id, True):
         raise HTTPException(409, f"A demo trade for {body.symbol} is already running.")
     cash = portfolio.demo_account(c.conn, user.id, autotrade.demo_start(c.conn, user.id))["cash"]
@@ -431,7 +395,7 @@ async def get_settings(user: users.User = Depends(current_user), c: Ctx = Depend
         "user": user.public(),
         "okx": {"configured": users.okx_credentials(c.conn, user.id) is not None,
                 "key_hint": key[-4:] if key else None, "region": g("okx_region", "eea"), "updated_at": updated},
-        "bankroll": g("bankroll"), "risk_budget": g("risk_budget"), "notify_url_set": bool(g("notify_url", "")),
+        "bankroll": g("bankroll"), "notify_url_set": bool(g("notify_url", "")),
         "demo_mode": bool(g("demo_mode", False)), "autotrade": autotrade.config(c.conn, user.id),
         "fees": {"taker": g("fee_taker"), "maker": g("fee_maker"),
                  "okx_reported": (account_status(c.conn, user.id) or {}).get("fee_rate"),
@@ -443,7 +407,6 @@ async def get_settings(user: users.User = Depends(current_user), c: Ctx = Depend
 
 class Prefs(BaseModel):
     bankroll: float | None = Field(default=None, gt=0, le=100_000_000)
-    risk_budget: float | None = Field(default=None, ge=0, le=100_000_000)
     notify_url: str | None = Field(default=None, max_length=300)
     demo_mode: bool | None = None
     fee_taker: float | None = Field(default=None, ge=0, le=0.01)  # fractions: 0.002 = 0.20%
@@ -471,27 +434,17 @@ async def put_prefs(body: Prefs, request: Request, user: users.User = Depends(cu
 
 class AutoTrade(BaseModel):
     enabled: bool
-    types: list[str] = Field(max_length=4)
     max_open: int = Field(ge=1, le=50)
     max_invested_pct: float = Field(ge=0.05, le=1.0)
 
-    @field_validator("types")
-    @classmethod
-    def known(cls, v):
-        bad = [t for t in v if t not in autotrade.TYPES]
-        if bad:
-            raise ValueError(f"unknown types {bad}")
-        return v
-
 
 async def _autotrade_now(c: Ctx) -> list[dict]:
-    """Buy the current picks and rising coins right away (at fresh OKX prices) instead of waiting for the next
-    refresh or scan, e.g. just after automatic demo trading is switched on."""
+    """Buy the current swing copies right away (at fresh OKX prices) instead of waiting for the next 1-minute
+    cycle, e.g. just after automatic demo trading is switched on."""
     now = _now()
     view = c.pipeline.last_view or market_view(c.conn, c.settings, now)
-    rising = movers.load(c.conn, now)[0]
     markets = dict(view.markets)
-    wanted = {p.symbol: markets[p.symbol].pair for p in [*view.picks, *view.copies, *rising] if p.symbol in markets}
+    wanted = {p.symbol: markets[p.symbol].pair for p in view.copies if p.symbol in markets}
     if wanted:
         async with httpx.AsyncClient(timeout=10, headers={"User-Agent": "copy-signals/0.4"}) as client:
             fresh = await c.pipeline.spot.prices(client, list(wanted.values()))
@@ -500,10 +453,8 @@ async def _autotrade_now(c: Ctx) -> list[dict]:
                 markets[coin] = dataclasses.replace(markets[coin], price=fresh[pair])
     bank = reference_bankroll(c.conn, c.settings)
     fee_for = lambda uid: user_fee(c.conn, c.settings, uid)[0]  # noqa: E731
-    bought = autotrade.run(c.conn, view.picks + view.copies, bank["amount"], markets, now, reference_fee=bank["fee_rate"],
-                           fee_for=fee_for)
-    bought += autotrade.run(c.conn, rising, bank["amount"], markets, now, reference_fee=bank["fee_rate"], fee_for=fee_for)
-    return bought
+    return autotrade.run(c.conn, view.copies, bank["amount"], markets, now, reference_fee=bank["fee_rate"],
+                         fee_for=fee_for)
 
 
 @router.put("/settings/autotrade")
@@ -516,7 +467,7 @@ async def put_autotrade(body: AutoTrade, request: Request, user: users.User = De
         try:
             await _autotrade_now(c)
         except httpx.HTTPError:
-            pass  # no fresh prices right now: the next refresh or scan buys them
+            pass  # no fresh prices right now: the next 1-minute cycle buys them
     return autotrade.config(c.conn, user.id)
 
 

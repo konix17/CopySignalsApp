@@ -2,8 +2,8 @@
 
 Two speeds. Every minute: the followed traders' open positions (who bought and sold), OKX prices and OKX accounts,
 then swing copies and every open trade are updated. Every `refresh_minutes` (admin setting, 10 by default) a full
-refresh also re-reads the leaderboards to choose who to follow, trader drawdowns and price trends, which change
-slowly. Live prices for open trades come from the price stream every 2 seconds.
+refresh also re-reads the leaderboards to choose who to follow and trader drawdowns, which change slowly. Live
+prices for open trades come from the price stream every 2 seconds.
 
 Market-wide work (traders, swing copies, the track record) is shared by everyone and uses a reference bankroll for
 sizes. Per-user work (bankroll, OKX account sync, alerts, demo auto-trading) runs for each user separately.
@@ -23,15 +23,15 @@ from .accounts import build_account
 from .config import Settings
 from .logs import audit
 from .market import Market, OkxSpot
-from .models import Flow, Pick, Signal
-from .picks import market_regime
+from .models import Pick
 from .scoring import score_stats, top_traders
-from .signals import build_signals, meaningful_positions
+from .signals import meaningful_positions
 from .sources import Source, build_sources
 from .stream import TickerStream
 
 log = logging.getLogger(__name__)
 TREND_MAX_AGE = 3 * 3600
+TREND_COINS = ["BTC"]  # daily averages are only needed for BTC: below its 50-day average, copies are half size
 DRAWDOWN_MAX_AGE = 12 * 3600
 DRAWDOWNS_PER_REFRESH = 25
 ACCOUNT_FRESH = 3600
@@ -45,8 +45,6 @@ BOT_SECONDS = 60  # how often the trend bot checks whether its daily run is due 
 @dataclass
 class MarketView:
     regime: dict
-    signals: dict[str, Signal]  # market_key -> composite signal of the followed traders
-    flows: dict[tuple[str, str], Flow]
     markets: dict[str, Market]
     bankroll: dict
     copies: list[Pick] = field(default_factory=list)  # swing copies (swing.py): longs held 12 h or more
@@ -95,13 +93,12 @@ def market_view(conn: sqlite3.Connection, settings: Settings, now: int, user_id:
     """Everything the UI, alerts and tracker need, computed from the database. With `user_id`, copy sizes fit that
     user's bankroll; without, the reference bankroll."""
     scores = db.load_composite_scores(conn)
-    signals = build_signals(db.load_positions(conn), scores)
     markets = db.load_markets(conn)
-    regime = market_regime(markets)
+    regime = swing.market_regime(markets)
     bank = bankroll_info(conn, settings, now, user_id) if user_id is not None else reference_bankroll(conn, settings)
     copies = swing.candidates(conn, markets, scores, now, bank["amount"], bank["fee_rate"], settings.slippage,
                               settings.min_volume_usd, settings.max_spread, regime["risk_on"])
-    return MarketView(regime, {x.market_key: x for x in signals}, activity.flows(conn, now), markets, bank, copies)
+    return MarketView(regime, markets, bank, copies)
 
 
 class Pipeline:
@@ -121,7 +118,7 @@ class Pipeline:
         self.lock = asyncio.Lock()  # one data cycle (full or 1-minute) at a time
         self.full_running = False
         self.full_at = 0.0  # when the last full refresh finished
-        self.last_view: MarketView | None = None  # signals etc. from the last data cycle, reused by live ticks
+        self.last_view: MarketView | None = None  # prices and copies from the last data cycle, reused by live ticks
         self.live_at: int | None = None
 
     @property
@@ -249,22 +246,13 @@ class Pipeline:
 
     # --- cycles ------------------------------------------------------------------
 
-    def _market_coins(self) -> list[str]:
-        """Coins whose trends matter: BTC, the ones followed traders hold, and anything open."""
-        signals = build_signals(db.load_positions(self.conn), db.load_composite_scores(self.conn))
-        held = [r[0] for r in self.conn.execute(
-            "SELECT DISTINCT symbol FROM my_positions WHERE status = 'open' "
-            "UNION SELECT symbol FROM pick_trades WHERE status = 'open'")]
-        top_coins = [x.symbol for x in signals if x.direction == "long"][: self.settings.exchange_coin_limit]
-        return list(dict.fromkeys(["BTC", *top_coins, *held]))
-
     async def _decide(self, client: httpx.AsyncClient, ts: int) -> tuple[MarketView, list[dict], list[dict]]:
         """Rebuild the swing copies from the database and act on them: paper trades, advice, demo trades, alerts."""
         view = market_view(self.conn, self.settings, ts)
-        tracker.update_trades(self.conn, view.signals, view.markets, ts)
+        tracker.update_trades(self.conn, view.markets, ts)
         tracker.open_trades(self.conn, view.copies, view.markets, ts)
-        alerts = portfolio.update_positions(self.conn, view.signals, view.markets, ts)
-        alerts += portfolio.settle_demo_trades(self.conn, view.signals, view.markets, ts)
+        alerts = portfolio.update_positions(self.conn, view.markets, ts)
+        alerts += portfolio.settle_demo_trades(self.conn, view.markets, ts)
         self._record_closed_demo_trades(alerts, ts)
         bought = autotrade.run(self.conn, view.copies, view.bankroll["amount"], view.markets, ts,
                                reference_fee=view.bankroll["fee_rate"],
@@ -285,7 +273,7 @@ class Pipeline:
                 async with httpx.AsyncClient(timeout=30, headers={"User-Agent": "copy-signals/0.4"},
                                              follow_redirects=True) as client:
                     await asyncio.gather(*(self._refresh_source(client, src, ts) for src in self.sources))
-                    await self._refresh_markets(client, self._market_coins(), ts)
+                    await self._refresh_markets(client, TREND_COINS, ts)
                     await self.sync_accounts(client, ts)
                     view, alerts, bought = await self._decide(client, ts)
                 users.purge_sessions(self.conn, ts)
@@ -305,7 +293,7 @@ class Pipeline:
             async with httpx.AsyncClient(timeout=20, headers={"User-Agent": "copy-signals/0.4"},
                                          follow_redirects=True) as client:
                 await asyncio.gather(*(self._refresh_positions(client, src, ts) for src in self.sources),
-                                     self._refresh_markets(client, self._market_coins(), ts))
+                                     self._refresh_markets(client, TREND_COINS, ts))
                 await self.sync_accounts(client, ts)
                 view, alerts, bought = await self._decide(client, ts)
             now_picks = {p.symbol for p in view.copies}
@@ -316,10 +304,11 @@ class Pipeline:
     async def live_tick(self, client: httpx.AsyncClient) -> None:
         """Re-price every open position and paper trade, from the OKX price stream (REST for anything the stream
         hasn't got fresh). Demo and paper trades that hit their stop or target close; real positions get their
-        advice and alerts updated (the app never sells for you). Trader and trend signals come from the last
-        full refresh."""
+        advice and alerts updated (the app never sells for you). Whether copied traders still hold comes from the
+        last 1-minute cycle."""
         coins = {r[0] for r in self.conn.execute("SELECT DISTINCT symbol FROM my_positions WHERE status = 'open' "
-                                                 "UNION SELECT symbol FROM pick_trades WHERE status = 'open'")}
+                                                 "UNION SELECT symbol FROM pick_trades WHERE status = 'open' "
+                                                 "AND style = 'copy'")}
         now = int(time.time())
         if self.last_view is None:  # e.g. right after a restart: use what's in the database
             self.last_view = market_view(self.conn, self.settings, now)
@@ -336,9 +325,9 @@ class Pipeline:
         for coin, pair in pairs.items():
             if pair in prices:
                 markets[coin] = dataclasses.replace(view.markets[coin], price=prices[pair])
-        alerts = portfolio.settle_demo_trades(self.conn, view.signals, markets, now)
-        alerts += portfolio.update_positions(self.conn, view.signals, markets, now)
-        tracker.update_trades(self.conn, view.signals, markets, now)
+        alerts = portfolio.settle_demo_trades(self.conn, markets, now)
+        alerts += portfolio.update_positions(self.conn, markets, now)
+        tracker.update_trades(self.conn, markets, now)
         self._record_closed_demo_trades(alerts, now)
         await self._notify(client, alerts)
         self.live_at = now
