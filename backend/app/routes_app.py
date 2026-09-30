@@ -1,43 +1,26 @@
-"""The app's own API: swing copies, portfolio (real and demo), the trend bot, alerts, settings. Everything here is
-scoped to the logged-in user; shared market data is the same for everyone."""
+"""The app's own API: status, the OKX account mirror, the trend bot, the long/short paper test and settings.
+Per-user data (bot account, OKX account, settings) is scoped to the logged-in user; the long/short test is shared."""
 
 import asyncio
-import dataclasses
 import json
 import time
-from dataclasses import asdict
+from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 
-from . import app_settings, autotrade, db, portfolio, tracker, trendbot, users
+from . import app_settings, db, longshort, lsmodel, trendbot, users
 from .accounts import OkxAccount, UnsafeKeyError
 from .logs import audit
-from .pipeline import account_status, bankroll_info, market_view, reference_bankroll, user_fee
-from .web import Ctx, client_ip, ctx, current_user
+from .pipeline import account_status, user_fee
+from .web import Ctx, client_ip, ctx, current_user, require_admin
 
 router = APIRouter(prefix="/api")
-REFRESH_THROTTLE_S = 60
 
 
 def _now() -> int:
     return int(time.time())
-
-
-def _trade_url(c: Ctx, coin: str) -> str:
-    return c.pipeline.spot.url(coin)
-
-
-def _open_symbols(c: Ctx, user_id: int, demo: bool) -> set[str]:
-    return {r[0] for r in c.conn.execute(
-        f"SELECT symbol FROM my_positions WHERE user_id = ? AND status = 'open' AND source {'=' if demo else '!='} 'demo'",
-        (user_id,))}
-
-
-def _copy_out(c: Ctx, p, user_id: int, held: set[str], demo: set[str]) -> dict:
-    return asdict(p) | {"held": p.symbol in held, "demo_running": p.symbol in demo, "trade_url": _trade_url(c, p.symbol),
-                        "qty": p.size_usd / p.price if p.price else None}
 
 
 # --- status ------------------------------------------------------------------------
@@ -45,14 +28,11 @@ def _copy_out(c: Ctx, p, user_id: int, held: set[str], demo: set[str]) -> dict:
 @router.get("/status")
 async def status(user: users.User = Depends(current_user), c: Ctx = Depends(ctx)):
     rows = [dict(r) for r in c.conn.execute("SELECT source, last_ok, last_error FROM source_status ORDER BY source")]
-    now = _now()
     acct = account_status(c.conn, user.id)
     return {
         "user": user.public(),
-        "refreshing": c.pipeline.running,
         "updated_at": max((r["last_ok"] or 0 for r in rows), default=0) or None,
         "errors": [{"source": r["source"], "last_error": r["last_error"]} for r in rows if r["last_error"]],
-        "bankroll": bankroll_info(c.conn, c.settings, now, user.id),
         "exchange": {"name": c.pipeline.spot.name, "label": c.pipeline.spot.label},
         "account": {
             "configured": users.okx_credentials(c.conn, user.id) is not None,
@@ -61,139 +41,11 @@ async def status(user: users.User = Depends(current_user), c: Ctx = Depends(ctx)
             "synced_at": acct.get("synced_at") if acct else None,
             "can_trade": acct.get("can_trade") if acct else None,
         },
-        "demo_mode": bool(users.get_setting(c.conn, user.id, "demo_mode", False)),
         "notifications": bool(users.get_setting(c.conn, user.id, "notify_url", "")),
     }
 
 
-@router.post("/refresh")
-async def refresh(user: users.User = Depends(current_user), c: Ctx = Depends(ctx)):
-    last = int(db.get_pref(c.conn, "last_manual_refresh", "0"))
-    if c.pipeline.running or _now() - last < REFRESH_THROTTLE_S:
-        return {"started": False}
-    db.set_pref(c.conn, "last_manual_refresh", str(_now()))
-    asyncio.create_task(c.pipeline.refresh())
-    return {"started": True}
-
-
-# --- swing copies -------------------------------------------------------------------
-
-@router.get("/copies")
-async def copies(user: users.User = Depends(current_user), c: Ctx = Depends(ctx)):
-    view = market_view(c.conn, c.settings, _now(), user.id)
-    held, demo = _open_symbols(c, user.id, False), _open_symbols(c, user.id, True)
-    return {
-        "regime": view.regime,
-        "bankroll": view.bankroll,
-        "copies": [_copy_out(c, p, user.id, held, demo) for p in view.copies],
-    }
-
-
-def _find_copy(view, symbol: str):
-    """A current swing copy, sized for the user `view` was built for."""
-    return next((p for p in view.copies if p.symbol == symbol), None)
-
-
-# --- positions (real) --------------------------------------------------------------
-
-def _position_out(c: Ctx, r) -> dict:
-    d = dict(r)
-    d.pop("features", None)
-    price = d["exit_price"] if d["status"] == "closed" else d["last_price"]
-    d["pnl_pct"] = portfolio.pnl(r, price) if price else None
-    d["value_usd"] = (d["qty"] or 0) * price if price else None
-    d["pnl_usd"] = d["pnl_pct"] * d["size_usd"] if d["pnl_pct"] is not None else None
-    d["advice_reasons"] = json.loads(d["advice_reasons"] or "[]")
-    d["trade_url"] = _trade_url(c, d["symbol"])
-    if d["status"] == "open":
-        cost = d["cost_pct"] or 0
-        live = d["last_price"] or d["entry_price"]
-        d["stop_now"] = portfolio.effective_stop(d)  # rises with the price for trailing stops
-        d["net_now"] = live / d["entry_price"] - 1 - cost
-        d["if_target_usd"] = d["size_usd"] * (d["target_price"] / d["entry_price"] - 1 - cost)
-        d["if_stop_usd"] = d["size_usd"] * (d["stop_now"] / d["entry_price"] - 1 - cost)
-    return d
-
-
-def _owned(c: Ctx, user_id: int, pid: int):
-    row = c.conn.execute("SELECT * FROM my_positions WHERE id = ? AND user_id = ?", (pid, user_id)).fetchone()
-    if row is None:  # same answer whether it doesn't exist or belongs to someone else
-        raise HTTPException(404, "Not found.")
-    return row
-
-
-@router.get("/portfolio")
-async def portfolio_view(user: users.User = Depends(current_user), c: Ctx = Depends(ctx)):
-    rows = c.conn.execute(
-        "SELECT * FROM my_positions WHERE user_id = ? AND source != 'demo' AND (status = 'open' OR closed_at >= ?) "
-        "ORDER BY status DESC, COALESCE(closed_at, opened_at) DESC", (user.id, _now() - 30 * 86400)).fetchall()
-    return {
-        "account": portfolio.real_account(c.conn, user.id, account_status(c.conn, user.id)),
-        "live_at": c.pipeline.live_at,
-        "positions": [_position_out(c, r) for r in rows],
-        "results_by_type": portfolio.results_by_type(c.conn, user.id, demo=False),
-    }
-
-
-class NewPosition(BaseModel):
-    symbol: str = Field(min_length=1, max_length=20, pattern=r"^[A-Z0-9]+$")
-    size_usd: float = Field(gt=0, le=100_000_000)
-    entry_price: float = Field(gt=0)
-
-
-@router.post("/positions")
-async def add_position(body: NewPosition, request: Request, user: users.User = Depends(current_user),
-                       c: Ctx = Depends(ctx)):
-    now = _now()
-    view = market_view(c.conn, c.settings, now, user.id)
-    pick = _find_copy(view, body.symbol)
-    if not pick and body.symbol not in view.markets:
-        raise HTTPException(404, "Unknown coin.")
-    btc = view.markets.get("BTC")
-    pid = portfolio.open_position(c.conn, user_id=user.id, market_key=f"perp:{body.symbol}", symbol=body.symbol,
-                                  entry_price=body.entry_price, size_usd=body.size_usd, pick=pick, now=now,
-                                  btc_entry=btc.price if btc else None,
-                                  cost_pct=None if pick else 2 * view.bankroll["fee_rate"] + 0.001)
-    audit(c.conn, "position.added", user_id=user.id, username=user.username, ip=client_ip(request),
-          detail={"position": pid, "symbol": body.symbol, "size_usd": body.size_usd})
-    return _position_out(c, c.conn.execute("SELECT * FROM my_positions WHERE id = ?", (pid,)).fetchone())
-
-
-class ClosePosition(BaseModel):
-    exit_price: float | None = Field(default=None, gt=0)
-
-
-@router.post("/positions/{pid}/close")
-async def close(pid: int, body: ClosePosition, request: Request, user: users.User = Depends(current_user),
-                c: Ctx = Depends(ctx)):
-    row = _owned(c, user.id, pid)
-    if row["status"] != "open" or row["source"] not in ("manual", "demo"):
-        raise HTTPException(400, "Only open positions you entered by hand or demo trades can be closed here.")
-    markets = db.load_markets(c.conn)
-    btc = markets.get("BTC")
-    if row["source"] == "demo":  # demo trades always sell at the live price, so results can't be made up
-        live = markets.get(row["symbol"])
-        exit_price = (live.price if live else None) or row["last_price"] or row["entry_price"]
-    else:
-        exit_price = body.exit_price or row["last_price"]
-    portfolio.close_position(c.conn, pid, exit_price, _now(), reason="sold", btc_price=btc.price if btc else None)
-    audit(c.conn, "position.closed", user_id=user.id, username=user.username, ip=client_ip(request),
-          detail={"position": pid, "symbol": row["symbol"]})
-    return {"closed": pid}
-
-
-@router.delete("/positions/{pid}")
-async def delete(pid: int, request: Request, user: users.User = Depends(current_user), c: Ctx = Depends(ctx)):
-    row = _owned(c, user.id, pid)
-    if row["source"] == "synced":
-        raise HTTPException(400, "Positions synced from OKX follow your OKX account and can't be deleted here.")
-    with c.conn:
-        c.conn.execute("DELETE FROM alerts WHERE position_id = ? AND user_id = ?", (pid, user.id))
-        c.conn.execute("DELETE FROM my_positions WHERE id = ? AND user_id = ?", (pid, user.id))
-    audit(c.conn, "position.deleted", user_id=user.id, username=user.username, ip=client_ip(request),
-          detail={"position": pid, "symbol": row["symbol"], "source": row["source"]})
-    return {"deleted": pid}
-
+# --- OKX account (read-only mirror) ---------------------------------------------------
 
 @router.get("/account")
 async def account(user: users.User = Depends(current_user), c: Ctx = Depends(ctx)):
@@ -203,7 +55,8 @@ async def account(user: users.User = Depends(current_user), c: Ctx = Depends(ctx
     return {"configured": True, "status": account_status(c.conn, user.id),
             "holdings": q("SELECT * FROM user_holdings WHERE user_id = ? ORDER BY value_usd DESC"),
             "orders": q("SELECT * FROM user_orders WHERE user_id = ? ORDER BY time DESC"),
-            "trades": q("SELECT * FROM user_trades WHERE user_id = ? ORDER BY time DESC LIMIT 25")}
+            "trades": q("SELECT * FROM user_trades WHERE user_id = ? ORDER BY time DESC LIMIT 25"),
+            "trade_url": c.pipeline.spot.url("BTC").rsplit("/", 1)[0]}
 
 
 @router.post("/account/sync")
@@ -211,74 +64,9 @@ async def account_sync(request: Request, user: users.User = Depends(current_user
     """Quick re-read of the user's OKX account (e.g. right after placing an order)."""
     if users.okx_credentials(c.conn, user.id) is None:
         raise HTTPException(400, "Connect your OKX key in Settings first.")
-    now = _now()
     async with httpx.AsyncClient(timeout=30) as client:
-        status = await c.pipeline.sync_account(client, user.id, now)
-    view = c.pipeline.last_view or market_view(c.conn, c.settings, now)
-    portfolio.update_positions(c.conn, view.markets, now)
+        status = await c.pipeline.sync_account(client, user.id, _now())
     return {"status": status}
-
-
-# --- demo ----------------------------------------------------------------------------
-
-class DemoBuy(BaseModel):
-    symbol: str = Field(min_length=1, max_length=20, pattern=r"^[A-Z0-9]+$")
-    size_usd: float = Field(gt=0, le=100_000_000)
-
-
-@router.post("/demo")
-async def demo_buy(body: DemoBuy, request: Request, user: users.User = Depends(current_user), c: Ctx = Depends(ctx)):
-    """Buy a current swing copy with pretend money at the OKX price now, following the copy's plan."""
-    now = _now()
-    view = market_view(c.conn, c.settings, now, user.id)
-    pick = _find_copy(view, body.symbol)
-    if not pick:
-        raise HTTPException(404, f"{body.symbol} is no longer a swing copy.")
-    if body.symbol in _open_symbols(c, user.id, True):
-        raise HTTPException(409, f"A demo trade for {body.symbol} is already running.")
-    cash = portfolio.demo_account(c.conn, user.id, autotrade.demo_start(c.conn, user.id))["cash"]
-    if body.size_usd > cash + 0.01:
-        raise HTTPException(400, f"Not enough demo cash: ${cash:,.2f} available.")
-    btc = view.markets.get("BTC")
-    pid = portfolio.open_position(c.conn, user_id=user.id, market_key=pick.market_key, symbol=pick.symbol,
-                                  entry_price=pick.price, size_usd=body.size_usd, pick=pick, now=now, source="demo",
-                                  btc_entry=btc.price if btc else None)
-    audit(c.conn, "demo.buy", user_id=user.id, username=user.username, ip=client_ip(request),
-          detail={"position": pid, "symbol": pick.symbol, "size_usd": body.size_usd, "type": pick.strength})
-    return _position_out(c, c.conn.execute("SELECT * FROM my_positions WHERE id = ?", (pid,)).fetchone())
-
-
-@router.get("/demo")
-async def demo(user: users.User = Depends(current_user), c: Ctx = Depends(ctx)):
-    rows = c.conn.execute("SELECT * FROM my_positions WHERE user_id = ? AND source = 'demo' "
-                          "ORDER BY status DESC, COALESCE(closed_at, opened_at) DESC", (user.id,)).fetchall()
-    history = [dict(r) for r in c.conn.execute(
-        "SELECT ts, value, btc_price FROM demo_snapshots WHERE user_id = ? ORDER BY ts", (user.id,))]
-    return {"account": portfolio.demo_account(c.conn, user.id, autotrade.demo_start(c.conn, user.id)),
-            "live_at": c.pipeline.live_at, "trades": [_position_out(c, r) for r in rows],
-            "autotrade": autotrade.config(c.conn, user.id),
-            "results_by_type": portfolio.results_by_type(c.conn, user.id, demo=True), "history": history}
-
-
-class DemoReset(BaseModel):
-    start_balance: float = Field(gt=0, le=100_000_000)
-
-
-@router.post("/demo/reset")
-async def demo_reset(body: DemoReset, request: Request, user: users.User = Depends(current_user),
-                     c: Ctx = Depends(ctx)):
-    """Start the demo account over. The old results are kept in the audit log first."""
-    old = portfolio.demo_account(c.conn, user.id, autotrade.demo_start(c.conn, user.id))
-    by_type = portfolio.results_by_type(c.conn, user.id, demo=True)
-    with c.conn:
-        c.conn.execute("DELETE FROM alerts WHERE user_id = ? AND position_id IN "
-                       "(SELECT id FROM my_positions WHERE user_id = ? AND source = 'demo')", (user.id, user.id))
-        c.conn.execute("DELETE FROM my_positions WHERE user_id = ? AND source = 'demo'", (user.id,))
-        c.conn.execute("DELETE FROM demo_snapshots WHERE user_id = ?", (user.id,))
-    users.set_setting(c.conn, user.id, "demo_start_balance", body.start_balance)
-    audit(c.conn, "demo.reset", user_id=user.id, username=user.username, ip=client_ip(request),
-          detail={"new_balance": body.start_balance, "previous": old, "previous_by_type": by_type})
-    return {"account": portfolio.demo_account(c.conn, user.id, body.start_balance)}
 
 
 # --- trend bot ------------------------------------------------------------------------------
@@ -305,7 +93,7 @@ def _bot_out(c: Ctx, user: users.User) -> dict:
         "next_check": trendbot.decision_day(now) + trendbot.DAY + trendbot.CHECK_AFTER_S,
         "trades": trades, "history": history, "backtest": c.pipeline.bot_backtest,
         "fee_rate": user_fee(c.conn, c.settings, user.id)[0], "slippage": c.settings.slippage,
-        "default_balance": autotrade.demo_start(c.conn, user.id),
+        "default_balance": app_settings.get(c.conn, "default_demo_balance"),
     }
 
 
@@ -357,30 +145,69 @@ async def bot_reset(request: Request, user: users.User = Depends(current_user), 
     return _bot_out(c, user)
 
 
-# --- alerts and track record ------------------------------------------------------------
+# --- long/short paper test (shared) ----------------------------------------------------------
 
-@router.get("/alerts")
-async def alerts(user: users.User = Depends(current_user), c: Ctx = Depends(ctx)):
-    demo_mode = bool(users.get_setting(c.conn, user.id, "demo_mode", False))
-    rows = c.conn.execute(
-        "SELECT a.* FROM alerts a JOIN my_positions p ON p.id = a.position_id "
-        "WHERE a.user_id = ? AND a.seen = 0 AND (p.status = 'open' OR a.kind = 'demo_done') "
-        f"AND p.source {'=' if demo_mode else '!='} 'demo' ORDER BY a.ts DESC", (user.id,))
-    return [dict(r) for r in rows]
-
-
-@router.post("/alerts/{aid}/seen")
-async def seen(aid: int, user: users.User = Depends(current_user), c: Ctx = Depends(ctx)):
-    with c.conn:
-        cur = c.conn.execute("UPDATE alerts SET seen = 1 WHERE id = ? AND user_id = ?", (aid, user.id))
-    if not cur.rowcount:
-        raise HTTPException(404, "Not found.")
-    return {"seen": aid}
+def _ls_backtest(c: Ctx) -> dict | None:
+    """The walk-forward backtest of this exact model and book (python -m app.manage ls-backtest), if it was run."""
+    path = c.settings.history_path.with_name("ls_backtest.json")
+    try:
+        return json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return None
 
 
-@router.get("/performance")
-async def performance(user: users.User = Depends(current_user), c: Ctx = Depends(ctx)):
-    return tracker.performance(c.conn, db.load_markets(c.conn))
+async def _ls_out(c: Ctx, user: users.User) -> dict:
+    now = _now()
+    held = list(longshort.positions(c.conn))
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            prices = await c.pipeline.ls_live_prices(client, held + ["BTC"])
+    except httpx.HTTPError:
+        prices = c.pipeline.ls_prices[1]
+    days = [dict(r) for r in c.conn.execute("SELECT * FROM ls_days ORDER BY day DESC LIMIT 60")]
+    for d in days:
+        d["longs"], d["shorts"], d["ranking"] = json.loads(d["longs"]), json.loads(d["shorts"]), json.loads(d["ranking"])
+    latest = days[0] if days else None
+    for d in days[1:]:
+        d.pop("ranking")
+    return {
+        "state": c.pipeline.ls_state, "error": c.pipeline.ls_error, "is_admin": user.is_admin,
+        "account": longshort.value(c.conn, prices), "prices_at": int(c.pipeline.ls_prices[0]) or None,
+        "model": c.pipeline.model_info(), "next_run": longshort.decision_day(now) + 2 * longshort.DAY + longshort.RUN_AFTER_S,
+        "ranking": latest["ranking"] if latest else [], "ranking_day": latest["day"] if latest else None,
+        "longs": latest["longs"] if latest else [], "shorts": latest["shorts"] if latest else [],
+        "days": days,
+        "trades": [dict(r) for r in c.conn.execute("SELECT * FROM ls_trades ORDER BY ts DESC, id DESC LIMIT 60")],
+        "history": [[r[0], r[1], r[2]] for r in c.conn.execute("SELECT ts, equity, btc_price FROM ls_snapshots ORDER BY ts")],
+        "rules": {"top_coins": longshort.TOP_COINS, "fraction": longshort.FRACTION, "keep": longshort.KEEP,
+                  "cost": longshort.COST, "horizon_days": lsmodel.HORIZON, "features": len(lsmodel.FEATURES),
+                  "retrain_days": 30, "run_after_s": longshort.RUN_AFTER_S},
+        "backtest": _ls_backtest(c),
+    }
+
+
+@router.get("/longshort")
+async def longshort_view(user: users.User = Depends(current_user), c: Ctx = Depends(ctx)):
+    return await _ls_out(c, user)
+
+
+@router.post("/longshort/reset")
+async def longshort_reset(request: Request, admin: users.User = Depends(require_admin), c: Ctx = Depends(ctx)):
+    """Start the shared paper test over (admins). The final result is kept in the audit log; the next run opens a
+    fresh account right away."""
+    held = list(longshort.positions(c.conn))
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            prices = await c.pipeline.ls_live_prices(client, held + ["BTC"])
+    except httpx.HTTPError:
+        prices = {}
+    old = longshort.value(c.conn, prices)
+    longshort.reset(c.conn)
+    audit(c.conn, "ls.reset", user_id=admin.id, username=admin.username, ip=client_ip(request),
+          detail={"previous": {k: old[k] for k in ("start_balance", "equity", "pnl_pct", "started_at")} if old else None})
+    c.pipeline.ls_next_try = 0.0
+    c.pipeline.ls_wake.set()
+    return await _ls_out(c, admin)
 
 
 # --- settings ----------------------------------------------------------------------------
@@ -395,20 +222,15 @@ async def get_settings(user: users.User = Depends(current_user), c: Ctx = Depend
         "user": user.public(),
         "okx": {"configured": users.okx_credentials(c.conn, user.id) is not None,
                 "key_hint": key[-4:] if key else None, "region": g("okx_region", "eea"), "updated_at": updated},
-        "bankroll": g("bankroll"), "notify_url_set": bool(g("notify_url", "")),
-        "demo_mode": bool(g("demo_mode", False)), "autotrade": autotrade.config(c.conn, user.id),
+        "notify_url_set": bool(g("notify_url", "")),
         "fees": {"taker": g("fee_taker"), "maker": g("fee_maker"),
                  "okx_reported": (account_status(c.conn, user.id) or {}).get("fee_rate"),
                  "default_taker": c.settings.fee_rate, "default_maker": c.settings.maker_fee_rate},
-        "defaults": {"bankroll": app_settings.get(c.conn, "default_bankroll"),
-                     "demo_balance": app_settings.get(c.conn, "default_demo_balance")},
     }
 
 
 class Prefs(BaseModel):
-    bankroll: float | None = Field(default=None, gt=0, le=100_000_000)
     notify_url: str | None = Field(default=None, max_length=300)
-    demo_mode: bool | None = None
     fee_taker: float | None = Field(default=None, ge=0, le=0.01)  # fractions: 0.002 = 0.20%
     fee_maker: float | None = Field(default=None, ge=0, le=0.01)
 
@@ -428,47 +250,8 @@ async def put_prefs(body: Prefs, request: Request, user: users.User = Depends(cu
     if changed:
         audit(c.conn, "settings.changed", user_id=user.id, username=user.username, ip=client_ip(request),
               detail={k: ("(set)" if k == "notify_url" else v) for k, v in changed.items()})
-    return {"bankroll": bankroll_info(c.conn, c.settings, _now(), user.id),
-            "demo_mode": bool(users.get_setting(c.conn, user.id, "demo_mode", False))}
-
-
-class AutoTrade(BaseModel):
-    enabled: bool
-    max_open: int = Field(ge=1, le=50)
-    max_invested_pct: float = Field(ge=0.05, le=1.0)
-
-
-async def _autotrade_now(c: Ctx) -> list[dict]:
-    """Buy the current swing copies right away (at fresh OKX prices) instead of waiting for the next 1-minute
-    cycle, e.g. just after automatic demo trading is switched on."""
-    now = _now()
-    view = c.pipeline.last_view or market_view(c.conn, c.settings, now)
-    markets = dict(view.markets)
-    wanted = {p.symbol: markets[p.symbol].pair for p in view.copies if p.symbol in markets}
-    if wanted:
-        async with httpx.AsyncClient(timeout=10, headers={"User-Agent": "copy-signals/0.4"}) as client:
-            fresh = await c.pipeline.spot.prices(client, list(wanted.values()))
-        for coin, pair in wanted.items():
-            if pair in fresh:
-                markets[coin] = dataclasses.replace(markets[coin], price=fresh[pair])
-    bank = reference_bankroll(c.conn, c.settings)
-    fee_for = lambda uid: user_fee(c.conn, c.settings, uid)[0]  # noqa: E731
-    return autotrade.run(c.conn, view.copies, bank["amount"], markets, now, reference_fee=bank["fee_rate"],
-                         fee_for=fee_for)
-
-
-@router.put("/settings/autotrade")
-async def put_autotrade(body: AutoTrade, request: Request, user: users.User = Depends(current_user),
-                        c: Ctx = Depends(ctx)):
-    users.set_setting(c.conn, user.id, "autotrade", body.model_dump())
-    audit(c.conn, "demo.autotrade_settings", user_id=user.id, username=user.username, ip=client_ip(request),
-          detail=body.model_dump())
-    if body.enabled:
-        try:
-            await _autotrade_now(c)
-        except httpx.HTTPError:
-            pass  # no fresh prices right now: the next 1-minute cycle buys them
-    return autotrade.config(c.conn, user.id)
+    return {"fees": {"taker": users.get_setting(c.conn, user.id, "fee_taker"),
+                     "maker": users.get_setting(c.conn, user.id, "fee_maker")}}
 
 
 class OkxKey(BaseModel):

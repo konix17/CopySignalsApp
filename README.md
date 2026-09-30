@@ -1,26 +1,25 @@
 # Copy Signals
 
-Two crypto strategies for OKX spot, the two that held up in testing. The **Auto-trader** (home page) runs a
-backtested BTC/ETH trend strategy on a demo account. **Swing copies** follow consistently profitable public traders
-and copy a long once they've held it for 12 hours, selling when they sell. Every copy is followed as a paper trade to
-build an honest track record, and can be demo-traded automatically. With a read-only OKX key the app also mirrors your
-real portfolio and checks it. Other strategies were tested and dropped (see [Tested and dropped](#tested-and-dropped)).
+Two crypto strategies, each running with pretend money until it proves itself. The **Auto-trader** (home page) runs
+a backtested BTC/ETH trend strategy on a demo account. The **Long/short test** ranks the 25 most traded coins every day
+with a model trained on 8 years of market data, buys the best-scored fifth and shorts the worst-scored fifth, with paper
+money, futures fees and funding. With a read-only OKX key the app also mirrors your real OKX account. Many other ideas,
+including copying traders, were tested and dropped (see [Tested and dropped](#tested-and-dropped)). Nothing here trades
+real money.
 
-OKX is the only exchange: it's licensed in the EU (MiCA, via Malta), and among EU-licensed exchanges it has the most
-coins that trade enough to buy and sell cleanly. Binance stopped new spot trading for EU users in July 2026.
+OKX is the only exchange for real money: it's licensed in the EU (MiCA, via Malta; futures as "X-Perps" under MiFID).
 
 ## Run
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install --require-hashes -r requirements-dev.txt
+python3 -m venv .venv && .venv/bin/pip install --require-hashes -r requirements.txt -r requirements-dev.txt
 .venv/bin/uvicorn app.main:app --app-dir backend --port 8000
 ```
 
-Open http://localhost:8000 and log in. The first data pull takes 1–3 minutes; after that trader data refreshes every
-10 minutes (admin setting) for leaderboards and trader drawdowns. Followed traders' positions, OKX prices, swing copies
-and accounts update every minute. Open positions, demo trades and paper trades are
-re-priced every 2 seconds from OKX's live price stream (websocket), or every 10 seconds over REST while the stream is down.
-Tests: `.venv/bin/pytest`. Double-clicking `Start Copy Signals.command` does the same as the uvicorn line.
+Open http://localhost:8000 and log in. OKX prices and your OKX account refresh every 5 minutes. The trend bot checks
+once a day at 00:05 UTC and the long/short test runs at 00:15 UTC; the first long/short run happens right after the
+first start (market history, then training the model: a few minutes). Tests: `.venv/bin/pytest`. Double-clicking
+`Start Copy Signals.command` does the same as the uvicorn line.
 
 ## Auto-trader (trend bot)
 
@@ -53,6 +52,34 @@ difference is fees.
 
 Price history lives in `data/history.db` (`history.py`): OKX daily candles for the bot, Binance daily candles (all
 pairs, dead ones included) for research only.
+
+## Long/short test
+
+`longshort.py` (the paper account), `lsmodel.py` (the model), `lsdata.py` (the data). Research: `research/daily_patterns.py`
+and `research/longshort_check.py`.
+
+**What it does.** Every day after the 00:00 UTC close: new market data for every coin (Binance spot candles with
+taker-buy volume and trade counts, Binance perpetual volume and funding, Bybit open interest, Deribit's BTC implied
+volatility). 42 signals per coin (trends over 1–90 days, volatility, distance from averages, volume surges, buying
+pressure, funding, futures activity, open-interest changes, plus market-wide ones) are ranked across the day's 100
+most traded coins. Five gradient-boosting models, retrained every 30 days on everything since 2018, predict each coin's
+move over the next 3 days compared with the average coin; their predictions are averaged. Among the 25 most traded
+coins that have a perpetual, the best-scored fifth is bought and the worst-scored fifth is shorted, half the account
+on each side. A coin stays while it's within 1.5 fifths of its end. Every trade pays 0.10% (0.05% OKX futures taker +
+slippage) and positions pay or receive the day's funding. Paper money, one shared account ($10,000 at the start);
+admins can start it over.
+
+**Why.** The single-coin signals rank coins against each other consistently from 2018 through 2026 (calm coins beat
+wild ones, recent losers beat recent winners, coins with a lot of open interest for their volume do better), while
+nothing predicts where the whole market goes the next day. Buying only the best coins lost money in 2024–2026
+because altcoins as a group fell 55% a year; buying the best and shorting the worst cancels that out.
+
+**Backtest** (`python -m app.manage ls-backtest`, walk-forward: a model trained only on earlier data every 3 months,
+trading exactly like the paper account at daily closes): see the Long/short page for the latest numbers. From mid-2022,
+averaging five models gave about +83% a year with a −24% worst drop and a positive result in every year; a single
+model gave between +54% and +107% depending only on its random draw, so the size of the edge is uncertain. It stays
+positive with fees doubled and when trading a day late; tripled fees leave little. It needs futures (shorting) and
+trades about 70% of the account a day, so it's paper-only until months of live results match.
 
 ## Hosting (24/7, reachable from your phone)
 
@@ -98,11 +125,14 @@ cd backend
 ../.venv/bin/python -m app.manage set-password <username>
 ../.venv/bin/python -m app.manage list-users
 ../.venv/bin/python -m app.manage backtest                      # update price history, backtest every strategy
+../.venv/bin/python -m app.manage ls-update                     # long/short data: import data/market.db, fetch new days
+../.venv/bin/python -m app.manage ls-train                      # retrain the long/short model now
+../.venv/bin/python -m app.manage ls-backtest [2022-07-01]      # walk-forward backtest shown on the Long/short page
 ```
 
 In the app, admins get an **Admin** page: users (add, make admin, disable, reset password, unlock), active
-sessions (end any of them), the audit log with filters, data-source health, and app settings (refresh interval,
-default bankroll, starting demo balance).
+sessions (end any of them), the audit log with filters, data-source health, the long/short test's state, and the
+suggested starting balance for new trend bots.
 
 **Security** (OWASP Top 10, 2025):
 - **Passwords:** hashed with Argon2id. At least 12 characters. 5 wrong tries lock the account for 15 minutes, and
@@ -112,78 +142,51 @@ default bankroll, starting demo balance).
   30 minutes idle or 12 hours. Changing your password logs out your other sessions.
 - **Requests:** every state-changing request needs the session's CSRF token and a same-origin Origin header.
   Strict Content-Security-Policy (no inline scripts), HSTS when `HTTPS=1`, Host header allow-list, and API rate limit.
-- **Data access:** every user sees only their own positions, demo account, settings and keys; admin routes check
-  the role on the server.
+- **Data access:** every user sees only their own trend bot, OKX account, settings and keys (the long/short paper test
+  is shared and only admins can reset it); admin routes check the role on the server.
 - **Secrets:** OKX keys and 2FA secrets are encrypted (Fernet) with `data/secret.key` (file mode 600, git-ignored,
   back it up).
 - **Errors and logs:** errors never leak details (a reference number is logged instead) and input isn't echoed.
   `data/logs/app.log` rotates at 5 MB. The audit log records logins, failures, lockouts, setting changes, key changes
-  and demo trades, with secrets redacted, and warns on bursts of failed logins.
+  and bot and long/short trades, with secrets redacted, and warns on bursts of failed logins.
 - **Supply chain:** dependencies are pinned with hashes (`requirements*.txt`, made with pip-compile) and checked
   with `pip-audit`.
 
-## Demo and real
+## Your OKX account (read-only)
 
-The **Demo** switch in the top bar chooses what you see. On: the demo account, and swing copy buttons make demo buys.
-Off: your real OKX account.
-
-**Automatic demo trading** (Demo portfolio page) buys every new swing copy with demo money. Limits: at most 10 open
-trades and 60% of the demo account invested, both adjustable. Each trade is sized like the copy, scaled to the demo
-account, and closes by itself when the trader sells, at the safety stop or after 30 days. Results are shown by type, and
-an hourly chart compares the account with holding BTC. Only the demo account is ever traded automatically (this and the
-trend bot).
-
-### Connect OKX (read-only)
+### Connect OKX
 
 On OKX (European accounts: my.okx.com): Profile → API → Create API key. Choose a passphrase and tick **only
 "Read"**. Then paste it in **Settings → OKX connection**. The key is tested first, stored encrypted with your account,
 and refused if it can withdraw. European keys use OKX's `eea.okx.com` API; pick "Global account" for one opened
 outside Europe.
 
-The app then reads, every refresh (or when you click "Sync with OKX"):
-- **Balances:** your bankroll becomes your OKX trading-account total; Funding and Earn balances are shown separately.
-- **Trades:** each holding's average cost is worked out from them.
-- **Open orders:** it checks each holding is protected by a stop-loss (TP/SL or trailing stop) order.
-
-Coins you buy show up in "My portfolio" automatically, with the safety stop and hold plan of the swing copy that was live
-when you bought. When you sell on OKX, the position closes at your real sell price with your real fees.
+The Portfolio page then shows, refreshed every 5 minutes (or when you click "Sync with OKX"): your trading-account
+total, cash, Funding and Earn balances, each coin with its average cost (worked out from your trades) and result,
+whether a stop-loss order (TP/SL or trailing) protects it, open orders and recent trades.
 
 ### Fees
 
-Enter your OKX spot fees in **Settings → Your OKX fees** (for example maker 0.10%, taker 0.20%). Every swing
-copy's after-fee result, demo trade and result uses the taker fee, since market orders and triggered stops pay it. Until
-you set them, 0.20% taker is used.
+Enter your OKX spot fees in **Settings → OKX spot fees** (for example maker 0.10%, taker 0.20%). The trend bot pays the
+taker fee on every trade; until you set them, 0.20% is used. The long/short test uses futures costs (0.05% taker plus
+0.05% slippage).
 
 ### Phone alerts
 
 In **Settings → Phone notifications**, paste an `https://ntfy.sh/<secret-topic>` address and subscribe to that topic
-in the ntfy app. You get sell alerts and finished demo trades.
+in the ntfy app. You get the trend bot's trades and (admins) the long/short test's daily picks.
 
 ## Data (all public)
 
 | Source | Used for |
 |---|---|
-| Hyperliquid, GMX | Profitable traders: leaderboards, open positions, PnL history (drawdowns) |
-| OKX spot | Which coins you can buy, price, 24h volume, spread, daily/hourly/minute prices (trend, volatility, scanner) |
-| OKX price stream | Live prices for everything open (public websocket, `wseea.okx.com` for European accounts) |
-| OKX, Binance daily history | Backtests and the trend bot (`data/history.db`); Binance only for research |
-| Binance futures | Funding rates for the trend bot's funding rule (public, no account) |
+| OKX spot | Prices of your OKX coins; the trend bot's daily candles; live price stream for the bot |
+| Binance spot and futures | Daily candles of every coin (delisted ones kept), taker-buy volume, funding rates: the long/short model; the trend bot's funding rule |
+| Bybit | Daily open interest per coin (long/short model) |
+| Deribit | BTC implied volatility (long/short model) |
 
-## Following traders and selling
-
-**Traders worth following** (`scoring.py`): profitable in at least 2 of week / month / all time. Market makers and
-bots are excluded (huge volume relative to account size, tiny return), and so is anyone who lost 50% or more
-of their typical balance at some point last month. They're ranked by return, profit and consistency, minus
-their drawdown.
-
-**Sell advice for your positions** (`portfolio.py`):
-- **SELL:** the copied trader closed or halved the position, or the stop was hit.
-- **TAKE PROFIT:** target hit (positions you entered by hand: +20% by default; swing copies have no target).
-- **CHECK:** hold time up, or no stop order on OKX.
-
-**Track record** (`tracker.py`): each swing copy is one paper trade. It exits when the trader sells, at the safety stop
-or after 30 days, net of costs, and is compared with BTC over the same days. Paper trades of the dropped strategies
-stay in the database but aren't shown.
+Price history lives in `data/history.db`; the long/short model is saved as `data/ls_model.pkl` and its backtest as
+`data/ls_backtest.json`.
 
 ## Configuration (`.env` or environment)
 
@@ -191,75 +194,57 @@ stay in the database but aren't shown.
 |---|---|---|
 | `ALLOWED_HOSTS` | `localhost,127.0.0.1` | Host names the app answers to |
 | `HTTPS` | `0` | `1` behind HTTPS: secure cookies and HSTS |
-| `DB_PATH`, `SECRET_KEY_PATH`, `LOG_DIR` | `data/…` | |
-| `MIN_VOLUME_USD` / `MAX_SPREAD` | `20000000` / `0.002` | Tradability |
+| `DB_PATH`, `SECRET_KEY_PATH`, `LOG_DIR`, `HISTORY_PATH` | `data/…` | |
+| `RESEARCH_MARKET_DB` | `data/market.db` | research/collect_market.py's download, imported once to seed the long/short history |
 | `FEE_RATE` / `MAKER_FEE_RATE` / `SLIPPAGE` | `0.002` / `0.001` / `0.0005` | Per side; each user's own fees replace these |
-| `SOURCES` | `hyperliquid,gmx` | Trader data |
-| `NOTIFY_WEBHOOK_URL` | | Admin alerts (security warnings) |
+| `NOTIFY_WEBHOOK_URL` | | Admin alerts |
 
-Refresh interval, default bankroll and starting demo balance are set on the Admin page. OKX keys
-are set per user in Settings, not in `.env`.
+The suggested starting balance for new trend bots is set on the Admin page. OKX keys are set per user in Settings, not
+in `.env`. Training the long/short model needs about 1 GB of memory for a minute each month: on Oracle's free tier use
+the A1.Flex machine, not the 1 GB E2.Micro.
 
-## Toward automatic trading
+## Toward real money
 
-The order of steps:
-1. **Now:** manual trading with the order ticket.
-2. **Once the track record holds up after fees:** add an OKX executor in `execution.py`. It would place a market
-   buy with the copy's safety stop attached as a stop-loss order, and sell when the trader does. Use a separate key with
-   spot trading enabled, never withdrawals, locked to your server's IP. You'd confirm each order at first, and
-   there should be a kill switch and a maximum total exposure.
+Neither strategy trades real money. The order of steps:
+1. **Now:** both run with pretend money; compare their live results with their backtests.
+2. **Trend bot, after months that behave like the backtest:** a trade-only OKX spot key (never withdrawals, locked to
+   the server's IP), a money limit and a stop-everything switch, and your go-ahead.
+3. **Long/short, after 2–3 months of paper results close to the backtest:** OKX futures access (X-Perps in Europe
+   needs an appropriateness test), the same safeguards, and your go-ahead. It trades daily, so it has to be automated.
 
-## Swing copies (`swing.py`)
+## Research
 
-A long that a followed trader has held for at least 12 hours (and not cut in half), in a coin that's liquid on OKX
-spot, becomes a **Swing copy**: shown on the Swing copies page, followed as a paper trade, and bought by automatic demo
-trading when it's on. One copy per coin, following the best-scored trader holding it. It
-sells when that trader closes or halves the position (checked every minute), with a 25% safety stop and a 30-day cap,
-Size: 5% of the bankroll, half while BTC is below its 50-day average.
-
-**Why** (`research/copy_backtest.py`): 6,500 long trades by 260 random Hyperliquid traders (second half of the last
-90 days, traders never chosen with hindsight), copied on spot at 0.5% round-trip cost:
-
-| Copying | Per trade after costs |
-|---|---|
-| Every long, instantly / 1 / 5 / 10 minutes late | +0.28% / +0.29% / +0.29% / +0.28% |
-| Positions they closed within an hour | −0.59% |
-| Only positions still open after 4 / 12 / 24 hours | +1.07% / +1.33% / +1.90% |
-
-Delay doesn't matter; fees on short trades do. Positions traders keep are the ones they're right about (before costs
-they beat holding BTC over the same hours by 0.84–1.37%). It's a mostly rising market, so copies are being proven in demo.
-
-## Research: other data sources
-
-`research/sentiment_funding.py`: the Fear & Greed index didn't improve the trend bot. Futures funding did, in both
-2019–2022 and 2023–now: when a coin's 3-day average funding is at or below zero (traders are paying to bet against it),
-the bot keeps at least a third of that coin. That lifts the backtest from +51% to +55% a year (worst drop −49% either
-way).
+- `research/sentiment_funding.py`: the Fear & Greed index didn't improve the trend bot. Futures funding did, in both
+  2019–2022 and 2023–now: when a coin's 3-day average funding is at or below zero, the bot keeps at least a third of
+  that coin (+51% → +55% a year, worst drop −49% either way).
+- `research/collect_market.py` → `daily_patterns.py` → `longshort_check.py`: the long/short test above.
+- `research/futures_backtest.py`: the trend bot on futures. Cheaper fees are eaten by funding (about 10% a year on a
+  long), shorting in downtrends halved the return, 2x/3x leverage had −79%/−93% worst drops. Spot without leverage stays.
+- Copy trading: `copy_backtest.py`, `copy_recheck.py`, `copy_profitable.py`, `copy_patterns.py`,
+  `trader_positioning.py`, `dip_backtest.py` (see below).
 
 ## Tested and dropped
 
-These were in the app before. They were removed because they lost money after fees, lost to holding BTC, or had no
-test showing they'd make money. Their code is in the git history.
+Removed because they lost money after fees, lost to holding BTC, or only looked good on the data they were found on.
+Their code is in the git history.
 
-- **Picks** (coins several followed traders hold, in an uptrend and not overcrowded on Binance futures): no backtest
-  supported them. The copy-trading research above found that copying traders only pays for the positions they keep;
-  picks bought as soon as several traders held a coin.
-- **Rising now** (smaller coins starting to rise on unusual volume, and pump rides): replayed on 6 months of Binance
-  5-minute candles for 237 coins ranked 21–150 by volume, dead ones included (2026-03 to 2026-09, 0.65% round-trip
-  costs): 3,683 trades at −0.64% each after costs, every month negative; early movers −0.67%, pump rides −0.63%.
-  Random entries with the same exits did −0.48%. Before costs the flags averaged about 0%: no edge.
-- **52 pump, breakout and dump rules** on 6 months of small coins: none worked on both the first four months and the
-  last two.
+- **Swing copies** (copy a followed trader's long once they've held it 12 hours, sell when they sell): the first test
+  showed +1.33% a trade, but the same coins bought at random times for the same hours did as well (Hyperliquid: skill
+  −0.2%, range −1.0% to +0.7%; July −2.8%). BTC rose 44% in those 92 days, so nearly any buy made money. Last month's
+  profitable traders did no better than last month's losers the next month, copying the moment they buy changed
+  nothing, and the crowd of recently profitable traders (Hyperliquid, OKX lead traders) didn't predict the next days
+  either. OKX lead traders showed a small edge, possibly because traders who quit aren't listed.
+- **Buying dips** (a top-50 coin down 10–30% in a week): +5–10% a trade on 2018–2022, −0.7% to −2.5% on 2023–now.
+- **Picks** (coins several followed traders hold): no backtest supported them.
+- **Rising now** (smaller coins starting to rise on unusual volume, and pump rides): 3,683 trades at −0.64% each after
+  costs on 6 months of 5-minute candles, every month negative; random entries did −0.48%.
+- **52 pump, breakout and dump rules** on small coins: none worked on both halves of the data.
 - **Top-20 coin trend portfolio** and **top-5 weekly gainers**: see the table under Auto-trader; both lost to holding
   BTC once delisted coins are included.
 
 ## Caveats
 
-- Copy-trading followers usually do worse than the traders they copy, mostly through late entries and quick trades
-  that don't cover the fees. Swing copies only follow positions kept 12 hours for that reason, but only the track
-  record will show whether it keeps working.
-- Trader drawdowns fill in over the first hours, and the first swing copies appear after 12 hours (positions that were
-  already open when the app started watching a trader count from that moment).
-- Before you charge subscribers, get legal advice: specific paid buy/sell recommendations can be regulated
-  investment advice, and each data source's terms need checking for commercial use.
-- This is a research tool, not financial advice.
+- Backtests show what rules would have done, not what they will do. The trend bot wins by losing less in crashes and
+  lags BTC in booms. The long/short model's edge was clear in every year tested, but its size varied a lot between
+  otherwise identical models, and daily trading makes it sensitive to real costs.
+- Research tool, not financial advice.

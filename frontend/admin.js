@@ -28,8 +28,8 @@ const ADMIN_TABS = {
         ${tile("Users", s.counts.users)}${tile("Active sessions", s.counts.active_sessions)}
         ${tile("Failed logins (24h)", sec.failed_logins_24h)}${tile("Locked accounts", sec.locked_accounts)}
         ${tile("Security warnings (24h)", sec.warnings_24h)}${tile("Database size", `${fixed(s.db_bytes / 1e6, 1)} MB`)}
-        ${tile("Followed traders", s.counts.followed_traders)}${tile("Open demo trades", s.counts.open_demo_trades)}
-        ${tile("Tracked copies open / closed", `${s.counts.tracked_copies_open} / ${s.counts.tracked_copies_closed}`)}
+        ${tile("OKX accounts connected", s.counts.okx_connected)}${tile("Trend bots", s.counts.trend_bots)}
+        ${tile("Long/short positions", s.counts.longshort_positions)}${tile("Long/short days run", s.counts.longshort_days)}
       </div>
       <h3>Data sources</h3>
       <div class="table-wrap"><table>
@@ -38,8 +38,11 @@ const ADMIN_TABS = {
           <td>${r.last_attempt ? esc(ago(r.last_attempt)) : "–"}</td><td class="num">${r.duration_s ?? "–"} s</td>
           <td>${r.last_error ? `<span class="down">${esc(r.last_error)}</span>` : `<span class="up">OK</span>`}</td></tr>`).join("")}</tbody>
       </table></div>
-      <p class="note">Full refresh: ${s.refreshing ? "running now" : "idle"} · live prices: ${s.live_at ? esc(ago(s.live_at)) : "–"}
-        (${s.stream.connected ? `streaming ${s.stream.fresh} of ${s.stream.pairs} coins from OKX` : "price stream down, polling every 10 s"})</p>`;
+      <p class="note">Long/short test: ${esc(s.longshort.state)}${s.longshort.error ? ` (${esc(s.longshort.error)})` : ""}
+        · model ${s.longshort.model ? `trained ${esc(ago(s.longshort.model.trained_at))} on ${num(s.longshort.model.rows)} coin-days` : "not trained yet"}
+        · trend bot prices: ${s.stream.connected ? `streaming ${s.stream.fresh} of ${s.stream.pairs} coins from OKX` : "OKX price stream down, using REST"}</p>
+      <p class="note small">Sources: spot_prices = OKX prices (every 5 minutes), ls_data = Binance, Bybit and Deribit daily
+        data, ls_model = the long/short model, ls_run = the daily long/short run.</p>`;
   },
 
   async users() {
@@ -129,7 +132,7 @@ const ADMIN_TABS = {
       <form id="audit-filter" class="form inline audit-filter">
         <label>User <input name="username" placeholder="Any user…" value="${esc(f.username || "")}"
           autocomplete="off" spellcheck="false" autocapitalize="none" /></label>
-        <label>Action <input name="action" placeholder="auth., demo., settings…" value="${esc(f.action || "")}"
+        <label>Action <input name="action" placeholder="auth., bot., ls., settings…" value="${esc(f.action || "")}"
           autocomplete="off" spellcheck="false" autocapitalize="none" /></label>
         <label>Level <select name="level"><option value="">All levels</option>
           ${["info", "warning", "alert"].map((l) => `<option ${f.level === l ? "selected" : ""}>${l}</option>`).join("")}</select></label>

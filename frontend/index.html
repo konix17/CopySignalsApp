@@ -16,7 +16,7 @@
       <linearGradient id="area-grad" x1="0" y1="0" x2="0" y2="1"><stop offset="0" class="area-grad-a" /><stop offset="1" class="area-grad-b" /></linearGradient>
     </defs>
     <symbol id="i-bot" viewBox="0 0 24 24"><rect x="5" y="7" width="14" height="12" rx="3" /><path d="M12 3v4M9 12h.01M15 12h.01M9.5 15.5h5M2.5 12v3M21.5 12v3" /></symbol>
-    <symbol id="i-copies" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><circle cx="12" cy="12" r="5" /><circle cx="12" cy="12" r="1" /></symbol>
+    <symbol id="i-longshort" viewBox="0 0 24 24"><path d="M7 20V5M3.5 8.5 7 5l3.5 3.5M17 4v15M13.5 15.5 17 19l3.5-3.5" /></symbol>
     <symbol id="i-portfolio" viewBox="0 0 24 24"><path d="M12 3v9h9" /><circle cx="12" cy="12" r="9" /></symbol>
     <symbol id="i-record" viewBox="0 0 24 24"><path d="M4 20V11M10 20V5M16 20v-6M3 20h18" /></symbol>
     <symbol id="i-how" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M9.6 9.2a2.5 2.5 0 1 1 3.4 2.3c-.6.3-1 .9-1 1.6v.4M12 17h.01" /></symbol>
@@ -33,18 +33,17 @@
     <aside class="sidebar" aria-label="Sidebar">
       <div class="logo">
         <svg class="logo-mark" viewBox="0 0 32 32" aria-hidden="true"><rect class="bg" width="32" height="32" rx="9" /><path class="ln" d="M7 21l6-6 4 4 8-9" /></svg>
-        <h1 class="brand">Copy Signals<small>Crypto signals &amp; auto-trading</small></h1>
+        <h1 class="brand">Copy Signals<small>Crypto strategies, tested honestly</small></h1>
       </div>
       <nav class="side-nav" id="menu" aria-label="Main">
         <a href="#bot" data-page="bot"><svg class="icon" aria-hidden="true"><use href="#i-bot" /></svg>Auto-trader</a>
-        <a href="#copies" data-page="copies"><svg class="icon" aria-hidden="true"><use href="#i-copies" /></svg>Swing copies</a>
-        <a href="#portfolio" data-page="portfolio"><svg class="icon" aria-hidden="true"><use href="#i-portfolio" /></svg><span class="portfolio-label">Portfolio</span></a>
-        <a href="#record" data-page="record"><svg class="icon" aria-hidden="true"><use href="#i-record" /></svg>Track record</a>
+        <a href="#longshort" data-page="longshort"><svg class="icon" aria-hidden="true"><use href="#i-longshort" /></svg>Long/short test</a>
+        <a href="#portfolio" data-page="portfolio"><svg class="icon" aria-hidden="true"><use href="#i-portfolio" /></svg>Portfolio</a>
         <div class="nav-label">Help</div>
         <a href="#how" data-page="how"><svg class="icon" aria-hidden="true"><use href="#i-how" /></svg>How it works</a>
       </nav>
       <div class="side-foot">
-        <p class="side-note">Research tool, not financial advice. Automatic trading uses demo money only.</p>
+        <p class="side-note">Research tool, not financial advice. Nothing here trades real money.</p>
       </div>
     </aside>
 
@@ -56,11 +55,7 @@
         </div>
         <div class="status"><span id="status-dot" class="dot idle" aria-hidden="true"></span><span id="status-text" class="muted">Loading…</span>
           <span id="status-live" class="sr-only" aria-live="polite"></span></div>
-        <span id="demo-badge" class="demo-badge" hidden>DEMO</span>
         <div class="spacer"></div>
-        <label class="switch" title="Demo on: see and trade your demo account. Demo off: your real OKX account.">
-          <input type="checkbox" id="demo-toggle" /><span class="slider"></span><span class="switch-label">Demo</span>
-        </label>
         <button id="notify" class="btn ghost small" hidden><svg class="icon" aria-hidden="true"><use href="#i-bell" /></svg>Alerts</button>
         <!-- Account menu: who's signed in, pages that aren't in the phone tab bar, and logging out. -->
         <div class="account" id="account">
@@ -69,7 +64,6 @@
           </button>
           <div id="account-menu" class="account-menu" hidden>
             <div class="account-who" id="account-who"></div>
-            <a href="#record" data-page="record" class="desk-hide"><svg class="icon" aria-hidden="true"><use href="#i-record" /></svg>Track record</a>
             <a href="#how" data-page="how" class="desk-hide"><svg class="icon" aria-hidden="true"><use href="#i-how" /></svg>How it works</a>
             <a href="#settings" data-page="settings"><svg class="icon" aria-hidden="true"><use href="#i-settings" /></svg>Settings</a>
             <a href="#admin" data-page="admin" class="admin-only" hidden><svg class="icon" aria-hidden="true"><use href="#i-admin" /></svg>Admin</a>
@@ -82,7 +76,6 @@
 
   <main id="content" tabindex="-1">
     <div id="load-error" class="alert warning" role="alert" hidden><span></span></div>
-    <div id="alerts" aria-live="polite"></div>
 
     <section class="page" data-page="bot" hidden>
       <div class="page-head"><div><h2>Auto-trader</h2>
@@ -90,49 +83,24 @@
       <div id="bot"></div>
     </section>
 
-    <section class="page" data-page="copies" hidden>
-      <div class="page-head"><div><h2>Swing copies</h2>
-        <p>A proven trader’s long that they’ve held for at least 12 hours, bought on OKX spot and sold when the trader
-          sells. Copying those made +1.33% a trade after fees in a test on 6,500 trades by 260 traders, beating holding
-          BTC; copying their quick trades lost money, and copying faster didn’t help. A mostly rising market isn’t proof,
-          so they’re tracked and demo-traded first.</p></div>
-        <span id="regime" class="regime"></span></div>
-      <div id="copies" class="picks"></div>
+    <section class="page" data-page="longshort" hidden>
+      <div class="page-head"><div><h2>Long/short test</h2>
+        <p>Each day a model ranks the 25 most traded coins. The best-scored fifth is bought and the worst-scored fifth
+          is shorted, with paper money, futures fees and funding, so the result doesn’t depend on the market going up.
+          It’s a live check of a backtest before any real money.</p></div></div>
+      <div id="longshort"></div>
     </section>
 
     <section class="page" data-page="portfolio" hidden>
-      <div id="real-view">
-        <div class="page-head"><div><h2>Portfolio</h2>
-          <p>Your real OKX account. The app reads it with your read-only key and tells you when to sell; it never
-            trades your money.</p></div>
-          <button id="sync" class="btn small ghost" hidden>Sync with OKX</button></div>
-        <div id="portfolio"></div>
-        <div id="real-types"></div>
-        <div id="connect"></div>
-        <details id="trades-box" class="card" hidden>
-          <summary>Recent OKX trades</summary>
-          <div id="trades"></div>
-        </details>
-      </div>
-      <div id="demo-view" hidden>
-        <div class="page-head"><div><h2>Demo portfolio</h2>
-          <p>Pretend money at real OKX prices. Each demo trade follows its plan by itself: it sells when the copied
-            trader sells, at the safety stop, or after 30 days. Switch Demo off in the top bar to see your real account.</p></div></div>
-        <div id="demo"></div>
-        <div id="autotrade"></div>
-        <div id="demo-progress"></div>
-      </div>
-    </section>
-
-    <section class="page" data-page="record" hidden>
-      <div class="page-head"><div><h2>Track record</h2>
-        <p>Every swing copy is followed as one paper trade, from the OKX price when it appears until the copied trader
-          sells, the safety stop or 30 days. Results are after fees, compared with holding BTC over the same days.</p></div></div>
-      <div id="performance"></div>
+      <div class="page-head"><div><h2>Portfolio</h2>
+        <p>Your real OKX account, read with your read-only key: balances, coins, stop orders and recent trades.
+          The app never places orders.</p></div>
+        <button id="sync" class="btn small ghost" hidden>Sync with OKX</button></div>
+      <div id="portfolio"></div>
     </section>
 
     <section class="page" data-page="settings" hidden>
-      <div class="page-head"><div><h2>Settings</h2><p>Your login, OKX connection, fees, bankroll and phone alerts.</p></div></div>
+      <div class="page-head"><div><h2>Settings</h2><p>Fees, your OKX connection, phone alerts and login security.</p></div></div>
       <div id="settings"></div>
     </section>
 
@@ -153,52 +121,48 @@
         <p>What each part does, the logic behind it, and what the tests on past data say about it.</p></div></div>
       <div class="how-grid">
         <article class="card how">
-          <p class="card-title"><svg class="icon" aria-hidden="true"><use href="#i-bot" /></svg>Auto-trader</p>
+          <p class="card-title"><svg class="icon" aria-hidden="true"><use href="#i-bot" /></svg>Auto-trader (trend bot)</p>
           <p>BTC and ETH each get half the account. Each half is split in three: one third is invested while the price is
             above its 50-day average, one for the 100-day and one for the 150-day; below an average, that third sits in cash
-            (USDT). When a coin’s futures funding rate turns negative (traders are paying to bet against it), the bot keeps
-            at least a third of that coin anyway: crowded bets against a coin tend to get squeezed.</p>
+            (USDT). When a coin’s futures funding rate turns negative, at least a third is kept anyway.</p>
           <p>It checks once a day at 00:05 UTC with your OKX fee on every trade. Tested on every day since 2018: +55% a year
-            vs +35% for holding BTC, with about half the worst drop. Checking every hour instead made less (+39%) because of
-            fees.</p>
+            vs +35% for holding BTC, with about half the worst drop. It wins by losing less in crashes, not by beating BTC in
+            booms.</p>
         </article>
         <article class="card how">
-          <p class="card-title"><svg class="icon" aria-hidden="true"><use href="#i-copies" /></svg>Swing copies</p>
-          <p>The app follows consistently profitable Hyperliquid and GMX traders and re-reads their positions every minute.
-            When one of them has held a long for 12 hours without cutting it in half, and the coin trades enough on OKX
-            spot, it becomes a swing copy: one per coin, following the best-scored trader holding it.</p>
-          <p>It sells when that trader closes or halves the position, with a 25% safety stop and a 30-day limit. Each copy
-            uses 5% of your money, half that while BTC is below its 50-day average.</p>
+          <p class="card-title"><svg class="icon" aria-hidden="true"><use href="#i-longshort" /></svg>Long/short test</p>
+          <p>Coins behave differently from each other in ways that repeat: calm coins tend to beat wild ones, coins that just
+            fell tend to beat ones that just rose, and coins with many futures bets relative to their trading tend to do
+            better. A model learns 42 such signals from 8 years of data (677 coins, delisted ones included) and ranks the
+            most traded coins every day.</p>
+          <p>Buying the best fifth and shorting the worst fifth made money in every year since 2020 in a walk-forward test,
+            also on 2024–2026 data it never saw, after futures fees and funding. It needs futures to short, so it runs with
+            paper money until live results match the backtest.</p>
         </article>
         <article class="card how">
-          <p class="card-title"><svg class="icon" aria-hidden="true"><use href="#i-portfolio" /></svg>Why these two</p>
-          <p>Copying every trade a trader makes barely beat the fees (+0.28% a trade), and trades they closed within an
-            hour lost 0.59% each. Positions they keep for 12 hours made +1.33% a trade after fees: the ones they keep are
-            the ones they’re right about.</p>
-          <p>Other strategies were dropped: coins starting to rise, 52 pump, breakout and dump rules, a top-20 coin trend
-            portfolio and the week’s top gainers lost money or lost to holding BTC after fees, and buying what several
-            traders hold had no test showing it would make money.</p>
+          <p class="card-title"><svg class="icon" aria-hidden="true"><use href="#i-how" /></svg>What was tested and dropped</p>
+          <p>Copying traders (Hyperliquid, GMX, OKX lead traders), recently profitable traders, the crowd of profitable
+            traders, dip buying, pump and breakout rules, leverage and daily market timing. Each looked good on some past
+            data and failed on newer data, mostly because a rising market made any buying look smart.</p>
+          <p>The research scripts are in the <code>research</code> folder.</p>
         </article>
         <article class="card how">
-          <p class="card-title"><svg class="icon" aria-hidden="true"><use href="#i-record" /></svg>Demo and real money</p>
-          <p><b>Demo</b> (switch in the top bar): pretend money at real prices. Demo buys and automatic demo trading follow
-            each copy’s plan by themselves. The auto-trader has its own demo account.</p>
-          <p><b>Real</b>: your OKX account, read with a read-only key. The app gives advice and alerts; you place orders on
-            OKX yourself. Nothing trades real money.</p>
+          <p class="card-title"><svg class="icon" aria-hidden="true"><use href="#i-portfolio" /></svg>Real money</p>
+          <p>Nothing here trades your money. The portfolio page reads your OKX account with a read-only key. Before either
+            strategy trades real money it needs months of paper results that match its backtest, an OKX key that can trade
+            but never withdraw, a money limit and a stop-everything switch.</p>
         </article>
         <article class="card how">
-          <p class="card-title"><svg class="icon" aria-hidden="true"><use href="#i-how" /></svg>Data</p>
-          <p>Hyperliquid and GMX (public trader positions), OKX (prices, live price stream, daily candles for the bot,
-            your account) and Binance futures funding rates (for the bot). Leaderboards refresh every 10 minutes;
-            positions, prices, swing copies and accounts every minute.</p>
-          <p>Everything is on OKX’s spot market, which is licensed in the EU. The app only reacts to public data and never
-            joins pump groups.</p>
+          <p class="card-title"><svg class="icon" aria-hidden="true"><use href="#i-record" /></svg>Data</p>
+          <p>OKX (prices, live stream, daily candles for the trend bot, your account), Binance (daily spot and futures
+            candles with buying pressure, funding rates), Bybit (open interest) and Deribit (BTC implied volatility). All
+            public; the long/short data updates once a day after the 00:00 UTC close.</p>
         </article>
       </div>
     </section>
 
     <p class="disclaimer">
-      Copy Signals shows what currently profitable traders hold. Past profit does not predict future profit. This is a research tool, not financial advice. Only trade money you can afford to lose.
+      Backtests show what rules would have done, not what they will do. This is a research tool, not financial advice. Only trade money you can afford to lose.
     </p>
   </main>
     </div>
@@ -206,7 +170,7 @@
 
   <nav class="tabbar" id="tabbar" aria-label="Main">
     <a href="#bot" data-page="bot"><svg class="icon" aria-hidden="true"><use href="#i-bot" /></svg>Bot</a>
-    <a href="#copies" data-page="copies"><svg class="icon" aria-hidden="true"><use href="#i-copies" /></svg>Copies</a>
+    <a href="#longshort" data-page="longshort"><svg class="icon" aria-hidden="true"><use href="#i-longshort" /></svg>Long/short</a>
     <a href="#portfolio" data-page="portfolio"><svg class="icon" aria-hidden="true"><use href="#i-portfolio" /></svg>Portfolio</a>
     <button type="button" id="tab-more" aria-controls="account-menu"><svg class="icon" aria-hidden="true"><use href="#i-more" /></svg>More</button>
   </nav>
@@ -218,5 +182,6 @@
   <script src="settings.js"></script>
   <script src="admin.js"></script>
   <script src="bot.js"></script>
+  <script src="longshort.js"></script>
 </body>
 </html>

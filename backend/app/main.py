@@ -34,9 +34,8 @@ def create_app(cfg: Settings = settings, background: bool = True) -> FastAPI:
     async def lifespan(app: FastAPI):
         tasks = []
         if background:
-            tasks = [asyncio.create_task(pipeline.run_forever()), asyncio.create_task(pipeline.run_live()),
-                     asyncio.create_task(pipeline.stream.run()),
-                     asyncio.create_task(pipeline.run_bots())]
+            tasks = [asyncio.create_task(pipeline.run_forever()), asyncio.create_task(pipeline.stream.run()),
+                     asyncio.create_task(pipeline.run_bots()), asyncio.create_task(pipeline.run_longshort())]
         yield
         for t in tasks:
             t.cancel()

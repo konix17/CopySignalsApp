@@ -34,7 +34,10 @@ active = [r for r in rows if float(dict(r["windowPerformances"])["month"]["vlm"]
 random.seed(20260930)
 sample = random.sample(active, min(args.sample, len(active)))
 app = sqlite3.connect(ROOT / "data" / "trading.db")
-followed = {r[0] for r in app.execute("SELECT DISTINCT address FROM trader_stats WHERE source='hyperliquid' AND followed=1")}
+try:  # traders the app used to follow for swing copies (that table is gone since copies were removed)
+    followed = {r[0] for r in app.execute("SELECT DISTINCT address FROM trader_stats WHERE source='hyperliquid' AND followed=1")}
+except sqlite3.OperationalError:
+    followed = set()
 value = {r["ethAddress"]: float(r["accountValue"]) for r in rows}
 todo = [(r["ethAddress"], "sample") for r in sample] + [(a, "followed") for a in sorted(followed)]
 print(f"{len(todo)} traders ({len(done)} already fetched)", flush=True)

@@ -6,11 +6,10 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from app import autotrade, db, portfolio, security, users
+from app import db, longshort, security, trendbot, users
 from app.config import Settings
 from app.logs import audit, redact
 from app.main import create_app
-from app.models import Check, Pick
 
 ADMIN_PW = "correct horse battery 42"
 USER_PW = "another long password 7"
@@ -41,7 +40,7 @@ def client_for(app, username=None, password=None) -> TestClient:
 def test_everything_requires_login(app_and_conn):
     app, _ = app_and_conn
     c = client_for(app)
-    for path in ("/api/copies", "/api/portfolio", "/api/demo", "/api/settings", "/api/admin/users", "/api/status"):
+    for path in ("/api/longshort", "/api/account", "/api/bot", "/api/settings", "/api/admin/users", "/api/status"):
         assert c.get(path).status_code == 401, path
     r = c.get("/", follow_redirects=False)
     assert r.status_code == 303 and r.headers["location"] == "/login.html"
@@ -60,17 +59,17 @@ def test_admin_pages_are_admin_only(app_and_conn):
 def test_users_cannot_touch_each_others_data(app_and_conn):
     app, conn = app_and_conn
     admin_id = users.by_name(conn, "admin1")["id"]
-    pid = portfolio.open_position(conn, user_id=admin_id, market_key="perp:BTC", symbol="BTC", entry_price=100,
-                                  size_usd=50, pick=None, now=0)
-    portfolio.raise_alert(conn, conn.execute("SELECT * FROM my_positions WHERE id = ?", (pid,)).fetchone(),
-                          "x", "SELL", "test", 0)
+    trendbot.start(conn, admin_id, 5000, now=0, btc_price=100)
+    users.set_secret(conn, admin_id, "okx_api_key", "admins-key-1234")
+    with conn:
+        conn.execute("INSERT INTO user_holdings VALUES (?, 'SOL', 'okx', 1, 0, 100, 100, 90, 1, 0, NULL, NULL, NULL, NULL, 0)",
+                     (admin_id,))
     alice = client_for(app, "alice", USER_PW)
-    assert alice.post(f"/api/positions/{pid}/close", json={}).status_code == 404
-    assert alice.delete(f"/api/positions/{pid}").status_code == 404
-    aid = conn.execute("SELECT id FROM alerts").fetchone()[0]
-    assert alice.post(f"/api/alerts/{aid}/seen").status_code == 404
-    assert alice.get("/api/portfolio").json()["positions"] == []
-    assert conn.execute("SELECT status FROM my_positions WHERE id = ?", (pid,)).fetchone()[0] == "open"
+    assert alice.get("/api/bot").json()["account"] is None  # the admin's bot isn't hers
+    assert alice.get("/api/account").json() == {"configured": False}
+    assert "1234" not in alice.get("/api/settings").text
+    assert alice.post("/api/bot/reset").json()["account"] is None
+    assert trendbot.account(conn, admin_id) is not None  # resetting her (empty) bot left the admin's alone
 
 
 # --- A07 authentication --------------------------------------------------------------------
@@ -161,12 +160,13 @@ def test_changes_need_the_csrf_token(app_and_conn):
     app, _ = app_and_conn
     c = client_for(app, "alice", USER_PW)
     token = c.headers.pop("X-CSRF-Token")
-    assert c.put("/api/settings/prefs", json={"demo_mode": True}).status_code == 403
-    assert c.put("/api/settings/prefs", json={"demo_mode": True}, headers={"X-CSRF-Token": "forged"}).status_code == 403
-    assert c.put("/api/settings/prefs", json={"demo_mode": True},
+    body = {"fee_taker": 0.0015}
+    assert c.put("/api/settings/prefs", json=body).status_code == 403
+    assert c.put("/api/settings/prefs", json=body, headers={"X-CSRF-Token": "forged"}).status_code == 403
+    assert c.put("/api/settings/prefs", json=body,
                  headers={"X-CSRF-Token": token, "Origin": "https://evil.example"}).status_code == 403
-    r = c.put("/api/settings/prefs", json={"demo_mode": True}, headers={"X-CSRF-Token": token})
-    assert r.status_code == 200 and r.json()["demo_mode"] is True
+    r = c.put("/api/settings/prefs", json=body, headers={"X-CSRF-Token": token})
+    assert r.status_code == 200 and r.json()["fees"]["taker"] == 0.0015
 
 
 def test_own_https_name_counts_as_same_origin_behind_a_proxy(tmp_path):
@@ -175,7 +175,7 @@ def test_own_https_name_counts_as_same_origin_behind_a_proxy(tmp_path):
     app = create_app(cfg, background=False)
     users.create(app.state.ctx.conn, "admin1", ADMIN_PW, role="admin")
     c = client_for(app, "admin1", ADMIN_PW)
-    body = {"demo_mode": True}
+    body = {"fee_taker": 0.0015}
     # The proxy forwards to localhost:8000; the browser's address is the Tailscale name.
     assert c.put("/api/settings/prefs", json=body, headers={"Origin": "https://bot.tail1234.ts.net",
                                                             "Host": "localhost:8000"}).status_code == 200
@@ -210,8 +210,8 @@ def test_errors_dont_leak_details(app_and_conn, monkeypatch):
 
     def boom(*a, **k):
         raise RuntimeError("secret internal detail")
-    monkeypatch.setattr(routes_app.tracker, "performance", boom)
-    r = c.get("/api/performance")
+    monkeypatch.setattr(routes_app.trendbot, "value", boom)
+    r = c.get("/api/bot")
     assert r.status_code == 500 and "secret internal detail" not in r.text and "reference" in r.json()["detail"]
 
 
@@ -266,7 +266,7 @@ def test_audit_trail_records_security_events(app_and_conn):
     app, conn = app_and_conn
     client_for(app).post("/api/auth/login", json={"username": "alice", "password": "bad password!"})
     c = client_for(app, "alice", USER_PW)
-    c.put("/api/settings/prefs", json={"bankroll": 500})
+    c.put("/api/settings/prefs", json={"fee_taker": 0.0015})
     c.post("/api/auth/logout")
     actions = [r[0] for r in conn.execute("SELECT action FROM audit_log ORDER BY id")]
     assert actions[:4] == ["auth.login_failed", "auth.login", "settings.changed", "auth.logout"]
@@ -311,23 +311,23 @@ def test_admin_creates_users_with_password_rules(app_and_conn):
 def test_admin_settings_are_validated(app_and_conn):
     app, _ = app_and_conn
     admin = client_for(app, "admin1", ADMIN_PW)
-    assert admin.put("/api/admin/settings", json={"values": {"refresh_minutes": 1}}).status_code == 400
+    assert admin.put("/api/admin/settings", json={"values": {"refresh_minutes": 5}}).status_code == 400  # removed
+    assert admin.put("/api/admin/settings", json={"values": {"default_demo_balance": 1}}).status_code == 400
     assert admin.put("/api/admin/settings", json={"values": {"default_demo_balance": 5000}}).status_code == 200
 
 
-def test_admin_status_counts_copies(app_and_conn):
+def test_admin_status_counts(app_and_conn):
     app, _ = app_and_conn
     body = client_for(app, "admin1", ADMIN_PW).get("/api/admin/status").json()
-    assert body["stream"]["connected"] is False
-    assert body["counts"]["tracked_copies_open"] == 0 and body["counts"]["tracked_copies_closed"] == 0
-    assert client_for(app, "admin1", ADMIN_PW).get("/api/admin/lab").status_code in (404, 405)  # the lab was removed
+    assert body["stream"]["connected"] is False and body["longshort"]["state"] == "starting"
+    assert body["counts"]["longshort_positions"] == 0 and body["counts"]["trend_bots"] == 0
 
 
-def test_copies_page(app_and_conn):
+def test_swing_copies_are_gone(app_and_conn):
     app, _ = app_and_conn
-    body = client_for(app, "alice", USER_PW).get("/api/copies").json()
-    assert body["copies"] == [] and "risk_on" in body["regime"] and body["bankroll"]["amount"] > 0
-    assert client_for(app, "alice", USER_PW).get("/api/movers").status_code in (404, 405)  # rising now was removed
+    c = client_for(app, "alice", USER_PW)
+    for path in ("/api/copies", "/api/demo", "/api/portfolio", "/api/performance", "/api/alerts"):
+        assert c.get(path).status_code in (404, 405), path
 
 
 def test_trend_bot_per_user_demo_account(app_and_conn):
@@ -347,106 +347,46 @@ def test_trend_bot_per_user_demo_account(app_and_conn):
     assert actions == {"bot.started", "bot.paused", "bot.reset"}
 
 
-# --- demo mode and automatic demo trading -----------------------------------------------------------------
+# --- long/short paper test --------------------------------------------------------------------------------
 
-def _pick(symbol="SOL", size=100.0, price=100.0, score=1.0):
-    """A swing copy."""
-    return Pick(market_key=f"perp:{symbol}", symbol=symbol, pair=f"{symbol}-USDT", strength="Copy", score=score,
-                checks=[Check("x", True, "y")], price=price, stop_price=price * 0.75, target_price=price * 2,
-                stop_pct=-0.25, target_pct=1.0, cost_pct=0.007, hold_days=30, hold_basis="estimated", size_usd=size,
-                net_win_usd=0, net_loss_usd=0, n_traders=1, buyers_24h=0, sellers_24h=0, features={"copy_log_id": 7})
-
-
-def test_demo_mode_switch(app_and_conn):
-    app, _ = app_and_conn
-    c = client_for(app, "alice", USER_PW)
-    assert c.get("/api/status").json()["demo_mode"] is False
-    c.put("/api/settings/prefs", json={"demo_mode": True})
-    assert c.get("/api/status").json()["demo_mode"] is True
-
-
-def test_autotrade_only_for_users_who_turned_it_on_and_within_limits(app_and_conn):
+def test_longshort_page_and_reset_is_admin_only(app_and_conn, monkeypatch):
     app, conn = app_and_conn
-    alice = users.by_name(conn, "alice")["id"]
-    # Saved before pick types were removed: the old "types" list is ignored.
-    users.set_setting(conn, alice, "autotrade", {"enabled": True, "types": ["Strong", "Pump"], "max_open": 2,
-                                                  "max_invested_pct": 0.5})
-    assert autotrade.config(conn, alice) == {"enabled": True, "max_open": 2, "max_invested_pct": 0.5}
-    picks = [_pick("XRP", score=0.5), _pick("SOL", score=3), _pick("ETH", score=2)]
-    bought = autotrade.run(conn, picks, reference_bankroll=1000, markets={}, now=100)
-    assert [b["symbol"] for b in bought] == ["SOL", "ETH"]  # best traders first, max 2 open, admin didn't opt in
-    rows = conn.execute("SELECT user_id, source, auto, size_usd, strength, style, features FROM my_positions").fetchall()
-    assert {r["user_id"] for r in rows} == {alice} and all(r["source"] == "demo" and r["auto"] == 1 for r in rows)
-    assert rows[0]["size_usd"] == pytest.approx(1000)  # 10% of the $10k demo account, like 100/1000 of the reference
-    assert rows[0]["strength"] == "Copy" and rows[0]["style"] == "copy"
-    assert json.loads(rows[0]["features"]) == {"copy_log_id": 7}
-    assert autotrade.run(conn, picks, 1000, {}, now=200) == []  # already at max open / already held
-    assert conn.execute("SELECT COUNT(*) FROM audit_log WHERE action = 'demo.auto_buy'").fetchone()[0] == 2
+    pipe = app.state.ctx.pipeline
 
-
-def test_autotrade_respects_invested_limit(app_and_conn):
-    _, conn = app_and_conn
-    alice = users.by_name(conn, "alice")["id"]
-    users.set_setting(conn, alice, "autotrade", {"enabled": True, "max_open": 10, "max_invested_pct": 0.15})
-    bought = autotrade.run(conn, [_pick("SOL"), _pick("ETH")], 1000, {}, now=100)
-    total = sum(b["size_usd"] for b in bought)
-    assert total <= 0.15 * 10_000 + 0.01 and len(bought) == 2 and bought[1]["size_usd"] == pytest.approx(500)
-
-
-def test_demo_page_has_progress_and_results(app_and_conn):
-    app, conn = app_and_conn
-    c = client_for(app, "alice", USER_PW)
-    alice = users.by_name(conn, "alice")["id"]
-    portfolio.snapshot_demo(conn, alice, 10_100, 50_000, now=1000)
-    body = c.get("/api/demo").json()
-    assert body["account"]["start_balance"] == 10_000 and body["history"][0]["value"] == 10_100
-    assert body["autotrade"]["enabled"] is False and body["results_by_type"] == {}
-    c.post("/api/demo/reset", json={"start_balance": 2000})
-    assert c.get("/api/demo").json()["account"]["value"] == 2000
-    assert conn.execute("SELECT COUNT(*) FROM audit_log WHERE action = 'demo.reset'").fetchone()[0] == 1
-
-
-def test_selling_a_demo_trade_uses_the_live_price(app_and_conn):
-    app, conn = app_and_conn
-    c = client_for(app, "alice", USER_PW)
-    alice = users.by_name(conn, "alice")["id"]
-    pid = portfolio.open_position(conn, user_id=alice, market_key="SOL", symbol="SOL", entry_price=100.0,
-                                  size_usd=500, pick=None, now=100, source="demo", cost_pct=0.005)
+    async def no_network(client, coins):
+        return {"BTC": 60_000.0, "SOL": 110.0}
+    monkeypatch.setattr(pipe, "ls_live_prices", no_network)
+    longshort.start(conn, 10_000, now=0, btc_price=50_000)
     with conn:
-        conn.execute("UPDATE my_positions SET last_price = 110 WHERE id = ?", (pid,))
-    assert c.post(f"/api/positions/{pid}/close", json={"exit_price": 1000}).status_code == 200
-    row = conn.execute("SELECT status, exit_price, net_return FROM my_positions WHERE id = ?", (pid,)).fetchone()
-    assert row["status"] == "closed" and row["exit_price"] == 110  # the typed price is ignored for demo trades
-    assert row["net_return"] == pytest.approx(0.095)  # +10% minus costs
-    users.create(conn, "bob", USER_PW, role="user")
-    bob = client_for(app, "bob", USER_PW)
-    assert bob.post(f"/api/positions/{pid}/close", json={}).status_code == 404
+        conn.execute("INSERT INTO ls_positions VALUES ('SOL', 10, 100, 0)")
+        conn.execute("UPDATE ls_account SET cash = 9000")
+    alice, admin = client_for(app, "alice", USER_PW), client_for(app, "admin1", ADMIN_PW)
+    body = alice.get("/api/longshort").json()
+    assert body["account"]["equity"] == pytest.approx(9000 + 10 * 110) and body["is_admin"] is False
+    assert body["account"]["btc_return"] == pytest.approx(0.2) and body["rules"]["top_coins"] == 25
+    assert alice.post("/api/longshort/reset").status_code == 403
+    assert longshort.account(conn) is not None
+    r = admin.post("/api/longshort/reset")
+    assert r.status_code == 200 and r.json()["account"] is None and pipe.ls_wake.is_set()
+    detail = json.loads(conn.execute("SELECT detail FROM audit_log WHERE action = 'ls.reset'").fetchone()[0])
+    assert detail["previous"]["equity"] == pytest.approx(10_100)
 
 
 # --- fees ------------------------------------------------------------------------------------------------------
 
 def test_user_fees_are_used_for_costs(app_and_conn):
     app, conn = app_and_conn
-    from app.pipeline import bankroll_info
+    from app.pipeline import user_fee
     c = client_for(app, "alice", USER_PW)
     alice = users.by_name(conn, "alice")["id"]
     cfg = app.state.ctx.settings
-    assert bankroll_info(conn, cfg, 0, alice)["fee_source"] == "default"
+    assert user_fee(conn, cfg, alice) == (cfg.fee_rate, "default")
+    users.set_setting(conn, alice, "account_status", {"ok": True, "fee_rate": 0.0035})
+    assert user_fee(conn, cfg, alice) == (0.0035, "okx")
     assert c.put("/api/settings/prefs", json={"fee_taker": 0.2}).status_code == 422  # 20% is not a fee
     assert c.put("/api/settings/prefs", json={"fee_taker": 0.002, "fee_maker": 0.001}).status_code == 200
-    b = bankroll_info(conn, cfg, 0, alice)
-    assert b["fee_rate"] == 0.002 and b["maker_fee_rate"] == 0.001 and b["fee_source"] == "yours"
+    assert user_fee(conn, cfg, alice) == (0.002, "yours")
     assert c.get("/api/settings").json()["fees"]["taker"] == 0.002
-
-
-def test_autotrade_costs_use_each_users_fee(app_and_conn):
-    _, conn = app_and_conn
-    alice = users.by_name(conn, "alice")["id"]
-    users.set_setting(conn, alice, "autotrade", {"enabled": True, "max_open": 5, "max_invested_pct": 1})
-    p = _pick("SOL")  # costed for a 0.10% reference fee: 0.007 round trip
-    autotrade.run(conn, [p], 1000, {}, now=1, reference_fee=0.001, fee_for=lambda uid: 0.002)
-    cost = conn.execute("SELECT cost_pct FROM my_positions").fetchone()[0]
-    assert cost == pytest.approx(0.007 + 2 * 0.001)
 
 
 def test_temporary_password_must_be_changed_first(app_and_conn):
@@ -456,6 +396,6 @@ def test_temporary_password_must_be_changed_first(app_and_conn):
         users.create(conn, "someone", "short1!")  # without temporary the rules apply
     c = client_for(app, "firstadmin", "short1!")
     assert c.get("/api/status").json()["user"]["must_change_password"] is True
-    assert c.get("/api/copies").status_code == 403 and c.get("/api/admin/users").status_code == 403
+    assert c.get("/api/longshort").status_code == 403 and c.get("/api/admin/users").status_code == 403
     assert c.post("/api/auth/password", json={"current": "short1!", "new": "a much better password 1"}).status_code == 200
     assert c.get("/api/admin/users").status_code == 200

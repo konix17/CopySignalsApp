@@ -1,82 +1,19 @@
 import sqlite3
-from dataclasses import asdict, fields
+import time
 from pathlib import Path
 
-from .models import Position, TraderStat
-
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS trader_stats (
-    source TEXT NOT NULL, address TEXT NOT NULL, window TEXT NOT NULL,
-    name TEXT, pnl REAL, roi REAL, volume REAL, account_value REAL, win_rate REAL,
-    score REAL NOT NULL, followed INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL,
-    PRIMARY KEY (source, address, window)
-);
-CREATE TABLE IF NOT EXISTS positions (
-    source TEXT NOT NULL, address TEXT NOT NULL, market_key TEXT NOT NULL, asset_class TEXT NOT NULL,
-    symbol TEXT, title TEXT, direction TEXT NOT NULL, size_usd REAL, entry_price REAL, mark_price REAL,
-    price_key TEXT, leverage REAL, unrealized_pnl REAL, opened_at INTEGER, url TEXT, updated_at INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS positions_market ON positions (market_key);
-
--- One row per trader position lifetime, so we can see traders entering and exiting.
--- baseline = the position already existed when we started watching this trader, and its
--- open time is unknown (exact = 0): it is not counted as a fresh buy, nor used for hold times.
-CREATE TABLE IF NOT EXISTS position_log (
-    id INTEGER PRIMARY KEY, source TEXT NOT NULL, address TEXT NOT NULL, market_key TEXT NOT NULL,
-    direction TEXT NOT NULL, first_seen INTEGER NOT NULL, exact INTEGER NOT NULL, baseline INTEGER NOT NULL,
-    last_seen INTEGER NOT NULL, size_usd REAL, peak_size_usd REAL, reduced_at INTEGER, closed_at INTEGER
-);
-CREATE INDEX IF NOT EXISTS position_log_open ON position_log (source, address, closed_at);
-CREATE INDEX IF NOT EXISTS position_log_market ON position_log (market_key, direction);
-CREATE TABLE IF NOT EXISTS trader_fetch (
-    source TEXT NOT NULL, address TEXT NOT NULL, last_fetched INTEGER NOT NULL, PRIMARY KEY (source, address)
-);
-
--- OKX spot market data: price, liquidity and trend per coin.
+-- OKX spot market data: price and liquidity per coin (values OKX holdings).
 CREATE TABLE IF NOT EXISTS markets (
     coin TEXT PRIMARY KEY, pair TEXT NOT NULL, price REAL NOT NULL, bid REAL, ask REAL, volume_usd REAL,
     ma20 REAL, ma50 REAL, ret30 REAL, daily_vol REAL, trend_at INTEGER, updated_at INTEGER NOT NULL,
     change_24h REAL
-);
-CREATE TABLE IF NOT EXISTS trader_quality (
-    source TEXT NOT NULL, address TEXT NOT NULL, max_drawdown REAL NOT NULL, updated_at INTEGER NOT NULL,
-    PRIMARY KEY (source, address)
 );
 CREATE TABLE IF NOT EXISTS source_status (
     source TEXT PRIMARY KEY, last_attempt INTEGER, last_ok INTEGER, last_error TEXT,
     n_traders INTEGER, n_positions INTEGER, duration_s REAL
 );
 
--- Track record: every swing copy is one paper trade, from when it first appears until it exits. Rows with a
--- style other than 'copy' are from strategies that were dropped; they're kept but no longer updated or shown.
-CREATE TABLE IF NOT EXISTS pick_trades (
-    id INTEGER PRIMARY KEY, market_key TEXT NOT NULL, symbol TEXT NOT NULL, direction TEXT NOT NULL DEFAULT 'long',
-    strength TEXT NOT NULL, opened_at INTEGER NOT NULL, entry_price REAL NOT NULL, stop_price REAL NOT NULL,
-    target_price REAL NOT NULL, hold_until INTEGER NOT NULL, cost_pct REAL NOT NULL, traders_at_entry INTEGER,
-    btc_entry REAL, checks TEXT, status TEXT NOT NULL DEFAULT 'open', closed_at INTEGER, exit_price REAL,
-    exit_reason TEXT, net_return REAL, btc_return REAL, last_price REAL,
-    style TEXT NOT NULL DEFAULT 'pick',  -- 'copy' (swing copy); older rows: 'pick', 'early' or 'pump'
-    trail_pct REAL, peak_price REAL,     -- trailing stop: exit when price falls trail_pct below peak_price
-    features TEXT                        -- the pick's inputs at entry (JSON), for learning
-);
-CREATE INDEX IF NOT EXISTS pick_trades_status ON pick_trades (status, market_key);
-
--- Each user's own positions. source: 'manual' (entered by hand), 'synced' (from their OKX account),
--- 'demo' (pretend money, closes by itself; auto = 1 when the demo auto-trader opened it).
-CREATE TABLE IF NOT EXISTS my_positions (
-    id INTEGER PRIMARY KEY, opened_at INTEGER NOT NULL, market_key TEXT NOT NULL, symbol TEXT NOT NULL,
-    direction TEXT NOT NULL, price_key TEXT NOT NULL, entry_price REAL NOT NULL, size_usd REAL NOT NULL,
-    stop_price REAL, target_price REAL, hold_until INTEGER, traders_at_entry INTEGER,
-    auto INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'open', closed_at INTEGER, exit_price REAL,
-    last_price REAL, advice TEXT, advice_reasons TEXT,
-    -- exchange_check: does the user's OKX account agree ('ok' | 'qty_mismatch' | 'missing')
-    qty REAL, source TEXT NOT NULL DEFAULT 'manual', exchange_check TEXT, stop_order_price REAL, exit_reason TEXT,
-    stop_order_kind TEXT,
-    cost_pct REAL, btc_entry REAL, net_return REAL, btc_return REAL, fees_usd REAL,  -- results
-    style TEXT NOT NULL DEFAULT 'pick', trail_pct REAL, peak_price REAL,
-    user_id INTEGER, strength TEXT,
-    features TEXT  -- the pick's inputs when it was opened (JSON), for learning which inputs predict winners
-);
 -- Each user's OKX account mirror (read-only key). Re-fetchable from OKX at any time.
 CREATE TABLE IF NOT EXISTS user_holdings (
     user_id INTEGER NOT NULL, coin TEXT NOT NULL, exchange TEXT NOT NULL, qty REAL NOT NULL, locked REAL NOT NULL,
@@ -91,11 +28,6 @@ CREATE TABLE IF NOT EXISTS user_trades (
 CREATE TABLE IF NOT EXISTS user_orders (
     user_id INTEGER NOT NULL, exchange TEXT NOT NULL, pair TEXT NOT NULL, order_id TEXT NOT NULL, kind TEXT NOT NULL,
     price REAL, stop_price REAL, qty REAL, time INTEGER, PRIMARY KEY (user_id, exchange, pair, order_id)
-);
-CREATE TABLE IF NOT EXISTS alerts (
-    id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, position_id INTEGER NOT NULL, kind TEXT NOT NULL,
-    level TEXT NOT NULL, message TEXT NOT NULL, seen INTEGER NOT NULL DEFAULT 0, user_id INTEGER,
-    UNIQUE (position_id, kind)
 );
 -- App-wide values (admin defaults as "setting.<name>").
 CREATE TABLE IF NOT EXISTS prefs (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -127,11 +59,6 @@ CREATE TABLE IF NOT EXISTS user_secrets (
     user_id INTEGER NOT NULL, name TEXT NOT NULL, value_enc TEXT NOT NULL, updated_at INTEGER NOT NULL,
     PRIMARY KEY (user_id, name)
 );
--- Demo account value over time (for the progress chart), with BTC for comparison.
-CREATE TABLE IF NOT EXISTS demo_snapshots (
-    user_id INTEGER NOT NULL, ts INTEGER NOT NULL, value REAL NOT NULL, btc_price REAL, PRIMARY KEY (user_id, ts)
-);
-
 -- Trend bot (trendbot.py): one account per user, demo money. last_run_day = the day (00:00 UTC) of the last check.
 CREATE TABLE IF NOT EXISTS bot_accounts (
     user_id INTEGER PRIMARY KEY, mode TEXT NOT NULL DEFAULT 'demo', enabled INTEGER NOT NULL DEFAULT 1,
@@ -151,58 +78,42 @@ CREATE TABLE IF NOT EXISTS bot_snapshots (
 );
 """
 
-_STAT_COLS = ["source", "address", "window", "name", "pnl", "roi", "volume", "account_value", "win_rate", "score"]
-_POS_COLS = [f.name for f in fields(Position)]
-
-
 def connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
-    _rename_columns(conn)
     _add_missing_columns(conn)
-    conn.executescript(POST_SCHEMA)
-    _migrate(conn)
+    _migrate(conn, path)
     return conn
 
 
-# Indexes on columns that older databases only get from _add_missing_columns, so they're created afterwards.
-POST_SCHEMA = """
-CREATE INDEX IF NOT EXISTS my_positions_user ON my_positions (user_id, status);
-"""
+# Swing copies (following Hyperliquid/GMX traders, their paper track record, demo trades, position advice) were
+# removed; their tables go, after a backup copy of the database is saved in data/backups/.
+REMOVED_TABLES = ("trader_stats", "positions", "position_log", "trader_fetch", "trader_quality", "pick_trades",
+                  "my_positions", "alerts", "demo_snapshots")
+REMOVED_USER_SETTINGS = ("demo_mode", "autotrade", "bankroll", "demo_start_balance")
 
 
-RENAMED_COLUMNS = [("my_positions", "binance_check", "exchange_check")]
-
-
-def _rename_columns(conn: sqlite3.Connection) -> None:
-    for table, old, new in RENAMED_COLUMNS:
-        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
-        if old in cols and new not in cols:
-            conn.execute(f"ALTER TABLE {table} RENAME COLUMN {old} TO {new}")
-    conn.commit()
-
-
-def _migrate(conn: sqlite3.Connection) -> None:
-    """One-off data moves between versions (safe to run every start)."""
+def _migrate(conn: sqlite3.Connection, path: Path) -> None:
+    """One-off changes between versions (safe to run every start)."""
+    have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    old = [t for t in REMOVED_TABLES if t in have]
+    if old and path.name != ":memory:":
+        backups = path.parent / "backups"
+        backups.mkdir(parents=True, exist_ok=True)
+        target = sqlite3.connect(backups / f"{path.stem}-before-removing-copies-{time.strftime('%Y%m%d-%H%M%S')}.db")
+        with target:
+            conn.backup(target)
+        target.close()
     with conn:
-        conn.execute("UPDATE my_positions SET source = 'synced' WHERE source = 'binance'")
-        for old in ("binance_holdings", "binance_trades", "binance_orders"):  # replaced by account_* tables
-            conn.execute(f"DROP TABLE IF EXISTS {old}")
-        # OKX is the only exchange now: drop Binance-era market data and settings (all re-fetched from OKX).
-        conn.execute("DELETE FROM prefs WHERE key IN ('binance_status', 'exchange')")
-        if conn.execute("SELECT 1 FROM markets WHERE pair NOT LIKE '%-%' LIMIT 1").fetchone():
-            conn.execute("DELETE FROM markets")
-        # The single-user account mirror became per-user (user_holdings/trades/orders); it's re-fetched from OKX.
-        for old in ("account_holdings", "account_trades", "account_orders"):
-            conn.execute(f"DROP TABLE IF EXISTS {old}")
-        conn.execute("DELETE FROM prefs WHERE key = 'account_status'")
-        # Market data of the strategies that were dropped (rising-now scanner, pump analysis, futures crowding).
-        for old in ("movers", "pumps", "positioning"):
-            conn.execute(f"DROP TABLE IF EXISTS {old}")
-        conn.execute("DELETE FROM prefs WHERE key IN ('scan_at', 'setting.default_risk_budget_pct')")
+        for t in old:
+            conn.execute(f"DROP TABLE {t}")
+        conn.execute(f"DELETE FROM user_settings WHERE key IN ({','.join('?' * len(REMOVED_USER_SETTINGS))})",
+                     REMOVED_USER_SETTINGS)
+        conn.execute("DELETE FROM prefs WHERE key IN ('setting.refresh_minutes', 'setting.default_bankroll', "
+                     "'last_manual_refresh')")
 
 
 def _add_missing_columns(conn: sqlite3.Connection) -> None:
@@ -221,52 +132,6 @@ def _add_missing_columns(conn: sqlite3.Connection) -> None:
                 conn.execute(ddl)
     conn.commit()
     scratch.close()
-
-
-def replace_source(
-    conn: sqlite3.Connection,
-    source: str,
-    stats: list[TraderStat],
-    followed: set[tuple[str, str]],
-    positions: list[Position],
-    ts: int,
-) -> None:
-    """Swap in one source's fresh traders and positions. `followed` holds (window, address) pairs."""
-    with conn:
-        conn.execute("DELETE FROM trader_stats WHERE source = ?", (source,))
-        conn.execute("DELETE FROM positions WHERE source = ?", (source,))
-        conn.executemany(
-            f"INSERT INTO trader_stats ({', '.join(_STAT_COLS)}, followed, updated_at) "
-            f"VALUES ({', '.join('?' * len(_STAT_COLS))}, ?, ?)",
-            [[getattr(s, c) for c in _STAT_COLS] + [int((s.window, s.address) in followed), ts] for s in stats],
-        )
-        conn.executemany(
-            f"INSERT INTO positions ({', '.join(_POS_COLS)}, updated_at) VALUES ({', '.join('?' * len(_POS_COLS))}, ?)",
-            [list(asdict(p).values()) + [ts] for p in positions],
-        )
-
-
-def replace_positions(conn: sqlite3.Connection, source: str, positions: list[Position], fetched: set[str],
-                      ts: int) -> None:
-    """Swap in fresh positions for the traders in `fetched`. Traders whose request failed keep their last known
-    positions (a failed request must not look like a sell-off)."""
-    with conn:
-        conn.executemany("DELETE FROM positions WHERE source = ? AND address = ?", [(source, a) for a in fetched])
-        conn.executemany(
-            f"INSERT INTO positions ({', '.join(_POS_COLS)}, updated_at) VALUES ({', '.join('?' * len(_POS_COLS))}, ?)",
-            [list(asdict(p).values()) + [ts] for p in positions if p.address in fetched],
-        )
-
-
-# How much each window counts toward a trader's overall score.
-COMPOSITE_WEIGHTS = {"day": 0.15, "week": 0.35, "month": 0.35, "allTime": 0.15}
-
-
-def load_composite_scores(conn: sqlite3.Connection) -> dict[tuple[str, str], float]:
-    """Blend each followed trader's window scores into one number."""
-    case = " ".join(f"WHEN '{w}' THEN {x}" for w, x in COMPOSITE_WEIGHTS.items())
-    rows = conn.execute(f"SELECT source, address, SUM(score * CASE window {case} ELSE 0 END) AS s FROM trader_stats GROUP BY 1, 2")
-    return {(r["source"], r["address"]): r["s"] for r in rows if r["s"] > 0}
 
 
 def save_markets(conn: sqlite3.Connection, markets: dict, ts: int) -> None:
@@ -295,21 +160,6 @@ def load_markets(conn: sqlite3.Connection) -> dict:
         out[r["coin"]] = Market(r["coin"], r["pair"], r["price"], r["bid"], r["ask"], r["volume_usd"],
                                 r["change_24h"], r["ma20"], r["ma50"], r["ret30"], r["daily_vol"])
     return out
-
-
-def trend_ages(conn: sqlite3.Connection) -> dict[str, int]:
-    return {r[0]: r[1] for r in conn.execute("SELECT coin, trend_at FROM markets WHERE trend_at IS NOT NULL")}
-
-
-def save_drawdowns(conn: sqlite3.Connection, source: str, dds: dict[str, float], ts: int) -> None:
-    with conn:
-        conn.executemany("INSERT OR REPLACE INTO trader_quality VALUES (?, ?, ?, ?)",
-                         [(source, a, d, ts) for a, d in dds.items()])
-
-
-def load_drawdowns(conn: sqlite3.Connection, source: str) -> dict[str, tuple[float, int]]:
-    rows = conn.execute("SELECT address, max_drawdown, updated_at FROM trader_quality WHERE source = ?", (source,))
-    return {r[0]: (r[1], r[2]) for r in rows}
 
 
 def set_status(conn: sqlite3.Connection, source: str, **values) -> None:

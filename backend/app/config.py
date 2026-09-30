@@ -34,21 +34,13 @@ class Settings:
     log_dir: Path = field(default_factory=lambda: Path(_env("LOG_DIR", str(ROOT / "data" / "logs"))))
     # Daily price history for backtests and the trend bot (history.py), kept apart from the app's database.
     history_path: Path = field(default_factory=lambda: Path(_env("HISTORY_PATH", str(ROOT / "data" / "history.db"))))
+    # Optional: research/collect_market.py's download, used once to seed the long/short test's market history.
+    research_market_db: Path = field(default_factory=lambda: Path(_env("RESEARCH_MARKET_DB",
+                                                                       str(ROOT / "data" / "market.db"))))
     # Host names the app answers to (blocks DNS-rebinding attacks). Add your domain when you host it.
     allowed_hosts: tuple[str, ...] = tuple(h.strip() for h in _env("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if h.strip())
     # Send cookies only over HTTPS. Turn on as soon as the app is served over HTTPS.
     https: bool = _env("HTTPS", "0") == "1"
-
-    # --- Data sources ---
-    # Wallet sources: venues where individual traders' profits and positions are public.
-    sources: tuple[str, ...] = tuple(s.strip() for s in _env("SOURCES", "hyperliquid,gmx").split(",") if s.strip())
-    top_n: int = int(_env("TOP_N", "40"))
-    hl_min_account_usd: float = float(_env("HL_MIN_ACCOUNT_USD", "25000"))
-    gmx_min_capital_usd: float = float(_env("GMX_MIN_CAPITAL_USD", "5000"))
-
-    # --- Tradability (OKX spot) ---
-    min_volume_usd: float = float(_env("MIN_VOLUME_USD", "20000000"))  # 24h quote volume
-    max_spread: float = float(_env("MAX_SPREAD", "0.002"))  # 0.2%
 
     # --- Costs ---
     # Per side, used until a user enters their own OKX fees in Settings (OKX EU spot: 0.20% taker, 0.10% maker).

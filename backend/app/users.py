@@ -248,20 +248,3 @@ def users_with_okx(conn: sqlite3.Connection) -> list[int]:
 
 def all_active(conn: sqlite3.Connection) -> list[User]:
     return [_user(r) for r in conn.execute("SELECT * FROM users WHERE disabled = 0")]
-
-
-def adopt_orphans(conn: sqlite3.Connection, user_id: int) -> dict:
-    """Give data created before accounts existed (positions, alerts, old settings) to `user_id`."""
-    with conn:
-        moved = conn.execute("UPDATE my_positions SET user_id = ? WHERE user_id IS NULL", (user_id,)).rowcount
-        conn.execute("UPDATE alerts SET user_id = (SELECT user_id FROM my_positions p WHERE p.id = alerts.position_id) "
-                     "WHERE user_id IS NULL")
-    carried = {}
-    for key in ("bankroll",):
-        row = conn.execute("SELECT value FROM prefs WHERE key = ?", (key,)).fetchone()
-        if row:
-            set_setting(conn, user_id, key, float(row[0]))
-            carried[key] = float(row[0])
-            with conn:
-                conn.execute("DELETE FROM prefs WHERE key = ?", (key,))
-    return {"positions": moved, "settings": carried}

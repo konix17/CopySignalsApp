@@ -1,592 +1,78 @@
-// Main app: swing copies, portfolio (real or demo), track record. Helpers are in common.js.
-const state = { status: null, account: null, portfolio: null, demo: null, bankroll: null };
-const demoMode = () => Boolean(state.status?.demo_mode);
-
-// ---------- Swing copy cards ----------
-function copyCard(p, i) {
-  const connected = state.status?.account.ok;
-  // The ✓/! symbol and colour are hidden from screen readers, which get the word instead.
-  const mark = (c) => `<span class="mark" aria-hidden="true">${c.passed ? "✓" : "!"}</span>`
-    + `<span class="sr-only">${c.passed ? "Yes: " : "Note: "}</span>`;
-  // In demo mode, amounts are sized to the demo account instead of your real bankroll.
-  const shown = demoMode() ? demoAmount(p) : p.size_usd;
-  const k = p.size_usd ? shown / p.size_usd : 1;
-  return `
-    <article class="pick" data-i="${i}">
-      <div class="pick-head">${coinIcon(p.symbol)}
-        <div class="pick-title"><span class="sym">${esc(p.symbol)}</span><span class="muted small">copying one trader</span></div>
-        <span class="grade g-Copy">Swing copy</span></div>
-      <div class="pick-amount">
-        <div><small>${demoMode() ? "Demo buy" : "Buy"}</small><b>${money(shown, 0)}</b></div>
-        <div class="right"><small>Hold</small><b>while they do</b></div></div>
-      <div class="levels">
-        <div><small>Buy around</small><b>${price(p.price)}</b></div>
-        <div><small>Safety stop</small><b class="down">${price(p.stop_price)}</b><span class="muted">${pct(p.stop_pct)}</span></div>
-        <div><small>Sell when</small><b>the trader sells</b><span class="muted">checked every minute</span></div>
-      </div>
-      <ul class="checks">${p.checks.map((c) => `
-        <li class="${c.passed ? "pass" : "warn"}">${mark(c)}
-          <span><span class="name">${esc(c.name)}</span><span class="detail">${esc(c.detail)}</span></span></li>`).join("")}
-      </ul>
-      ${p.notes.length ? `<ul class="pick-notes">${p.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}
-      <div class="net"><span class="muted">After fees</span><span>worst case ${signed(-1, money(p.net_loss_usd * k))} at the safety stop</span></div>
-      <div class="actions">
-        ${demoMode()
-          ? (p.demo_running ? `<span class="held">✓ Demo trade running</span>` : `<button class="btn small" data-act="demo">Demo buy</button>`)
-          : (p.held ? `<span class="held">✓ In your portfolio</span>` : `
-            <button class="btn small" data-act="ticket">How to buy on ${EX()}</button>
-            ${connected ? "" : `<button class="btn small ghost" data-act="bought">I bought it</button>`}`)}
-      </div>
-    </article>`;
-}
-
-function bindCards(container, list) {
-  container.querySelectorAll("[data-act]").forEach((b) => b.addEventListener("click", () => {
-    const card = b.closest(".pick");
-    const p = list[+card.dataset.i];
-    if (b.dataset.act === "ticket") toggleTicket(card, p);
-    if (b.dataset.act === "bought") openBuyForm(card, p);
-    if (b.dataset.act === "demo") openDemoForm(card, p);
-  }));
-}
-
-function renderCopies(data) {
-  const r = data.regime;
-  $("regime").className = `regime ${r.risk_on ? "on" : "off"}`;
-  $("regime").textContent = r.text;
-  if (busyInside($("copies"))) return;
-  if (!data.copies.length) {
-    $("copies").innerHTML = `<div class="empty">No swing copies right now. A copy appears when one of the followed traders
-      has held a long for 12 hours in a coin that trades enough on OKX. The traders are checked every minute.</div>`;
-    return;
-  }
-  $("copies").innerHTML = data.copies.map(copyCard).join("");
-  bindCards($("copies"), data.copies);
-}
-
-// OKX order steps: market buy, then a stop-loss order at the safety stop. There's no take-profit: you sell when the
-// app alerts you that the trader sold.
-function ticketSteps(p) {
-  const qty = Math.round(p.size_usd);
-  return `
-    <li>Open <a href="${esc(p.trade_url)}" target="_blank" rel="noopener">${esc(p.symbol)}/USDT on OKX</a> (Spot).</li>
-    <li>Buy → <b>Market</b> → amount in USDT <code>${qty}</code> ${copyButton(qty)}</li>
-    <li>Protect it: Sell → order type <b>TP/SL</b>, amount = all the ${esc(p.symbol)} you just bought. Leave TP empty.
-      <div>SL trigger price <code>${orderPrice(p.stop_price)}</code> ${copyButton(orderPrice(p.stop_price))}</div>
-      <div class="muted">Leave the order price on “Market” so it sells straight away when triggered.</div>
-    </li>
-    <li>Sell the rest yourself when the app alerts you that the trader sold (it checks every minute).</li>`;
-}
-
-function toggleTicket(card, p) {
-  const existing = card.querySelector(".ticket");
-  if (existing) return existing.remove();
-  const connected = state.status?.account.ok;
-  const t = document.createElement("div");
-  t.className = "ticket";
-  t.innerHTML = `
-    <ol>${ticketSteps(p)}</ol>
-    <div class="muted">You place the order yourself. The app never sees your password or funds.
-      ${connected ? "Once you’ve bought, it shows up in your portfolio after the next sync." : ""}</div>`;
-  card.querySelector(".actions").before(t);
-}
-
-// Real <form>s, so Enter submits; the button is disabled while saving and errors show inline.
-function openBuyForm(card, p) {
-  if (card.querySelector(".buy-form")) return card.querySelector(".buy-form input").focus();
-  const form = document.createElement("form");
-  form.className = "buy-form";
-  form.noValidate = true;
-  form.innerHTML = `
-    <label>Amount $ <input type="number" name="size" min="1" step="any" value="${Math.round(p.size_usd)}" /></label>
-    <label>Bought at <input type="text" name="price" inputmode="decimal" autocomplete="off" spellcheck="false"
-      value="${orderPrice(p.price)}" /></label>
-    <button class="btn small" type="submit">Save</button>
-    <button class="btn small ghost" type="button" data-act="cancel">Cancel</button>
-    <span class="form-msg" role="status"></span>`;
-  card.querySelector(".actions").before(form);
-  form.size.focus();
-  form.querySelector("[data-act=cancel]").addEventListener("click", () => form.remove());
-  form.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const msg = form.querySelector(".form-msg");
-    const size = +form.size.value;
-    const entry = parseNum(form.price.value);
-    if (!(size > 0)) { formMessage(msg, "Enter the amount you spent, above $0."); return form.size.focus(); }
-    if (!(entry > 0)) { formMessage(msg, "Enter the price you paid, for example 1.23 or 1,23."); return form.price.focus(); }
-    try {
-      await withBusy(form.querySelector("[type=submit]"), "Saving…",
-        () => post("/api/positions", { symbol: p.symbol, size_usd: size, entry_price: entry }));
-    } catch (err) { return formMessage(msg, err.message); }
-    await loadAll();
-  });
-}
-
-function openDemoForm(card, p) {
-  if (card.querySelector(".demo-form")) return card.querySelector(".demo-form input").focus();
-  const form = document.createElement("form");
-  form.className = "buy-form demo-form";
-  form.noValidate = true;
-  form.innerHTML = `
-    <label>Demo amount $ <input type="number" name="size" min="1" step="any" value="${demoAmount(p)}" /></label>
-    <span class="muted">${money(state.demo?.account.cash ?? 0, 0)} demo cash available</span>
-    <button class="btn small" type="submit">Start demo</button>
-    <button class="btn small ghost" type="button" data-act="cancel">Cancel</button>
-    <span class="form-msg" role="status"></span>`;
-  card.querySelector(".actions").before(form);
-  form.size.focus();
-  form.querySelector("[data-act=cancel]").addEventListener("click", () => form.remove());
-  form.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const msg = form.querySelector(".form-msg");
-    const size = +form.size.value;
-    if (!(size > 0)) { formMessage(msg, "Enter an amount above $0."); return form.size.focus(); }
-    try {
-      await withBusy(form.querySelector("[type=submit]"), "Starting…",
-        () => post("/api/demo", { symbol: p.symbol, size_usd: size }));
-    } catch (err) {
-      return formMessage(msg, err.message || "Couldn’t start the demo. Refresh the page and try again.");
-    }
-    await loadAll();
-    go("portfolio");
-    notice(`Demo trade for ${p.symbol} started.`);
-  });
-}
-
-// ---------- Shared: account panel + trade rows (used by your portfolio and the demo account) ----------
-// Older closed trades can carry reasons from strategies that were dropped (trend … pump_dump).
-const REASON_TEXT = { stop: "stop-loss hit", target: "take-profit reached", time: "hold time over",
-  trader_closed: "the copied trader sold", sold: "sold", manual: "sold", trend: "uptrend broke",
-  exited: "top traders left", flipped: "top traders turned against it", selling: "top traders sold",
-  pump_fading: "pump topped out", pump_dump: "pump dumping" };
-const checkLabel = (c) => ({ ok: ["ok", `✓ Matches ${EX()}`], qty_mismatch: ["bad", `Amount differs from ${EX()}`],
-  missing: ["bad", `Not found on ${EX()}`] })[c];
-const ADVICE_LABEL = { SELL: "Sell now", TAKE_PROFIT: "Take profit", WATCH: "Check", HOLD: "Hold" };
+// Main app: status, menus, and your OKX portfolio. The trend bot (bot.js), the long/short test (longshort.js),
+// settings (settings.js) and admin (admin.js) register their own page loaders. Helpers are in common.js.
+const state = { status: null, account: null };
 
 const tile = (label, value, sub = "") => `<div class="tile"><small>${label}</small><b>${value}</b>${sub ? `<span class="sub">${sub}</span>` : ""}</div>`;
-const isLive = (ts) => ts && Date.now() / 1000 - ts < 60;
-
 const stat = (label, value, sub = "") => `<div class="stat"><small>${label}</small><b>${value}</b>${sub ? `<span class="sub">${sub}</span>` : ""}</div>`;
 
-function accountPanel({ label, value, headline, a, live, extraTiles = [], footer = "" }) {
-  const running = a.running;
-  return `
-    <div class="card hero account-hero">
-      <div class="hero-top"><p class="card-title">${label}</p><span class="spacer"></span>
-        ${running ? `<span class="pill ${live ? "run" : ""}">${live ? "Live prices" : "Waiting for prices…"}</span>` : ""}</div>
-      <div class="value">${money(value, 2)}</div>
-      ${headline ? `<div class="value-sub">${headline}</div>` : ""}
-      <div class="stats">
-        ${extraTiles.join("")}
-        ${stat("Invested now", money(a.invested), running ? `${running} position${running === 1 ? "" : "s"} open` : "")}
-        ${stat("Open result", running ? signed(a.open_result, money(a.open_result)) : "–", "after fees, live")}
-        ${a.best_case == null ? "" : stat("If all targets hit", running ? signed(a.best_case, money(a.best_case)) : "–")}
-        ${stat("If all stops hit", running ? signed(a.worst_case, money(a.worst_case)) : "–")}
-        ${stat("Finished trades", a.finished ? `${a.successful} of ${a.finished} won` : "–",
-               a.finished ? signed(a.realized, money(a.realized) + " total") : "")}
-      </div>
-      ${footer}
-    </div>`;
-}
-
-function rangeBar(t) {
-  const stop = t.stop_now ?? t.stop_price;
-  const copy = t.style === "copy";
-  // Copies have no target: the bar puts the buy price in the middle, the safety stop on the left.
-  const top = copy ? 2 * t.entry_price - stop : t.target_price;
-  const progress = Math.min(1, Math.max(0, (t.last_price - stop) / (top - stop)));
-  const label = copy ? `Safety stop ${price(stop)}` : t.trail_pct ? `Trailing stop ${price(stop)}` : `Stop ${price(stop)}`;
-  return `
-    <div class="range" title="${copy ? "Where the price is compared with the buy price and the safety stop" : "Where the price is between the stop-loss and the take-profit"}">
-      <span class="${t.if_stop_usd >= 0 ? "up" : "down"}">${label}<br>${signed(t.if_stop_usd, money(t.if_stop_usd))}</span>
-      <div class="bar"><div class="marker" data-left="${(progress * 100).toFixed(1)}"></div></div>
-      ${copy ? `<span class="muted">No target<br>sells with the trader</span>`
-        : `<span class="up">Target ${price(t.target_price)}<br>+${money(t.if_target_usd)}</span>`}
-    </div>`;
-}
-
-function openRow(t, { tags = "", actions = "", status = "", extraDetails = "" }) {
-  const now = Date.now() / 1000;
-  const planned = (t.hold_until - t.opened_at) / 86400;
-  const day = Math.min(Math.ceil((now - t.opened_at) / 86400) || 1, Math.ceil(planned));
-  return `
-    <div class="pos ${t.source === "demo" ? "demo" : esc(t.advice)}" data-id="${t.id}">
-      <div class="pos-row">
-        ${coinIcon(t.symbol)}<span class="sym">${esc(t.symbol)}</span>${t.style === "copy" ? `<span class="tag">copy</span>` : ""}${tags}
-        <span class="pnl">${signed(t.net_now, `${pct(t.net_now, 2)} (${money((t.net_now || 0) * t.size_usd)})`)}</span>
-        <span class="grow"></span>
-        <span class="muted">day ${day} of ${Math.ceil(planned)}</span>
-        ${status}${actions}
-      </div>
-      ${rangeBar(t)}
-      <div class="pos-details">${money(t.size_usd)} bought at ${price(t.entry_price)} → now ${price(t.last_price)} · planned until ${date(t.hold_until)}${extraDetails}</div>
-      ${t.advice_reasons.length ? `<ul class="why">${t.advice_reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>` : ""}
-    </div>`;
-}
-
-function closedRow(t, { actions = "" } = {}) {
-  if (t.net_return == null) {  // closed before results were recorded
-    return `<div class="pos closed" data-id="${t.id}"><div class="pos-row">${coinIcon(t.symbol)}<span class="sym">${esc(t.symbol)}</span>
-      <span class="muted">closed ${date(t.closed_at)}</span><span class="grow"></span>${actions}</div></div>`;
-  }
-  const won = t.net_return > 0;
-  const fees = t.fees_usd != null ? ` · exchange fees ${money(t.fees_usd)}` : "";
-  const vsBtc = t.btc_return == null ? "" : ` · BTC did ${pct(t.btc_return)} over the same days`;
-  return `
-    <div class="pos demo ${won ? "won" : "lost"}" data-id="${t.id}">
-      <div class="pos-row">
-        ${coinIcon(t.symbol)}<span class="sym">${esc(t.symbol)}</span>
-        <span class="result ${won ? "won" : "lost"}">${won ? "Successful" : "Unsuccessful"}</span>
-        <span class="pnl">${signed(t.net_return, `${pct(t.net_return)} (${money(t.net_return * t.size_usd)})`)}</span>
-        <span class="grow"></span>${actions}
-      </div>
-      <div class="pos-details">${money(t.size_usd)} bought at ${price(t.entry_price)} on ${date(t.opened_at)}, ended at ${price(t.exit_price)}
-        on ${date(t.closed_at)}: ${esc(REASON_TEXT[t.exit_reason] || t.exit_reason)} · after fees${fees}${vsBtc}</div>
-    </div>`;
-}
-
-// ---------- Demo account ----------
-// Same share of the account as the copy suggests for your real bankroll, capped at the cash left.
-function demoAmount(p) {
-  const acct = state.demo?.account;
-  const bankroll = state.bankroll?.amount;
-  if (!acct || !bankroll) return Math.round(p.size_usd) || 100;
-  return Math.max(1, Math.min(Math.round((p.size_usd / bankroll) * acct.value), Math.floor(acct.cash)));
-}
-
-// Copies first; other types are trades entered by hand or from strategies that were dropped.
-const TYPE_HELP = { Copy: "swing copies", Other: "entered by hand" };
-
-function resultsTable(byType, title) {
-  const rows = Object.keys(byType).sort((a, b) => (b === "Copy") - (a === "Copy"));
-  if (!rows.length) return "";
-  return `<div class="card"><p class="card-title">${title}</p><div class="table-wrap"><table>
-    <thead><tr><th>Type</th><th class="num">Trades</th><th class="num">Win rate</th><th class="num">Average after fees</th>
-      <th class="num">Total</th><th class="num">BTC same days (avg)</th></tr></thead>
-    <tbody>${rows.map((t) => { const r = byType[t]; return `<tr><td>${esc(t)} <span class="muted small">${TYPE_HELP[t] || "earlier strategy, dropped"}</span></td>
-      <td class="num">${r.trades}</td><td class="num">${Math.round(r.win_rate * 100)}%</td>
-      <td class="num">${signed(r.avg_return, pct(r.avg_return, 2))}</td><td class="num">${signed(r.total_usd, money(r.total_usd))}</td>
-      <td class="num">${r.avg_btc == null ? "–" : signed(r.avg_btc, pct(r.avg_btc, 2))}</td></tr>`; }).join("")}</tbody></table></div></div>`;
-}
-
-// Demo account value over time vs. simply holding BTC with the same starting money (drawn with bot.js's lineChart).
-function drawDemoChart(history, start) {
-  const el = $("demo-chart");
-  if (!el) return;
-  const btc0 = history.find((h) => h.btc_price)?.btc_price;
-  lineChart(el, {
-    series: [{ key: "demo", label: "Demo account", points: history.map((h) => [h.ts, h.value]) },
-      { key: "btc", label: "Holding BTC", points: history.map((h) => [h.ts, btc0 && h.btc_price ? start * (h.btc_price / btc0) : null]) }],
-    fmtY: (v) => money(v, v < 1000 ? 2 : 0), baseline: start, label: "Demo account value over time compared with holding BTC",
-  });
-}
-
-const AT_STATE = (on) => on ? "On: new swing copies are bought with demo money automatically." : "Off";
-
-function renderAutotrade(cfg) {
-  if ($("autotrade").querySelector(":focus")) return;  // don't redraw while you're editing
-  $("autotrade").innerHTML = `
-    <div class="card autotrade">
-      <div class="card-head">
-        <label class="switch"><input type="checkbox" id="at-enabled" ${cfg.enabled ? "checked" : ""} /><span class="slider"></span>
-          <span class="switch-label"><b>Automatic demo trading</b></span></label>
-        <span class="muted small" id="at-state">${AT_STATE(cfg.enabled)}</span>
-      </div>
-      <p class="muted small">Buys every new swing copy with demo money, right away, and sells it when the copied trader sells,
-        at the safety stop or after 30 days (the price is checked every 2 seconds, the trader every minute). Only demo money
-        is ever traded.</p>
-      <div class="at-limits">
-        <label>At most <input type="number" id="at-max-open" min="1" max="50" value="${cfg.max_open}" /> open trades</label>
-        <label>At most <input type="number" id="at-max-pct" min="5" max="100" step="5" value="${Math.round(cfg.max_invested_pct * 100)}" />% of the account invested</label>
-        <button type="button" class="btn small" id="at-save">Save</button><span id="at-msg" class="form-msg" role="status"></span>
-      </div>
-    </div>`;
-  $("at-enabled").addEventListener("change", (e) => { $("at-state").textContent = AT_STATE(e.target.checked); });
-  $("at-save").addEventListener("click", async () => {
-    const body = {
-      enabled: $("at-enabled").checked,
-      max_open: +$("at-max-open").value,
-      max_invested_pct: +$("at-max-pct").value / 100,
-    };
-    try {
-      await withBusy($("at-save"), "Saving…", () => put("/api/settings/autotrade", body));
-      formMessage($("at-msg"), "Saved.", "ok");
-      loadDemo(true);
-    } catch (e) { formMessage($("at-msg"), e.message); }
-  });
-}
-
-function renderDemo(data) {
-  state.demo = data;
-  renderAutotrade(data.autotrade);
-  const a = data.account;
-  // The chart is only redrawn when a new hourly point arrives, so hovering it isn't interrupted by the live redraw.
-  const chartKey = `${data.history.length}:${data.history.at(-1)?.ts}`;
-  if (state.demoChartKey !== chartKey || !$("demo-chart")) {
-    state.demoChartKey = chartKey;
-    $("demo-progress").innerHTML = `<div class="card"><div class="chart-head"><p class="card-title">Demo account over time</p>
-        <div class="chart-legend"><span class="key demo">Demo account</span><span class="key btc">Holding BTC instead</span></div></div>
-        <div class="chart-wrap" id="demo-chart"></div></div>` + resultsTable(data.results_by_type, "Results by type");
-    drawDemoChart(data.history, a.start_balance);
-  }
-  const remove = (t) => `<button type="button" class="btn small ghost" data-act="remove" aria-label="Delete the ${esc(t.symbol)} demo trade">✕</button>`;
-  const sellNow = (t) => `<button type="button" class="btn small ghost" data-act="sell" aria-label="Sell the ${esc(t.symbol)} demo trade now">Sell now</button>`;
-  const panel = accountPanel({
-    label: "Demo account value", value: a.value, a, live: isLive(data.live_at),
-    headline: `<span class="chg ${a.total_result >= 0 ? "up" : "down"}">${pct(a.total_result_pct, 2)}</span>
-      ${signed(a.total_result, money(a.total_result, 2))}<span class="muted">since the start with ${money(a.start_balance, 0)}</span>`,
-    extraTiles: [stat("Cash available", money(a.cash))],
-    footer: `<details class="reset"><summary>Reset demo account</summary>
-        <form class="buy-form" id="demo-reset-form" novalidate>
-          <label>Start again with $ <input type="number" id="demo-start" name="start" min="1" step="any" value="${Math.round(a.start_balance)}" /></label>
-          <button class="btn small ghost" type="submit">Reset</button>
-          <span class="muted">Deletes all demo trades (the old results are kept in the audit log).</span>
-          <span class="form-msg" role="status"></span></form>
-      </details>`,
-  });
-  const rows = data.trades.map((t) => t.status === "open"
-    ? openRow(t, { tags: `<span class="tag">${t.auto ? "auto" : "demo"}</span>`, actions: sellNow(t) + remove(t) })
-    : closedRow(t, { actions: remove(t) })).join("");
-
-  $("demo").innerHTML = panel + (rows || `<div class="empty">No demo trades yet. Turn on automatic demo trading above, or use “Demo buy” on any swing copy.</div>`);
-  applyDynamicStyles($("demo"));
-  $("demo").querySelectorAll("[data-act=remove]").forEach((b) => b.addEventListener("click", async () => {
-    const row = b.closest(".pos");
-    const t = data.trades.find((x) => String(x.id) === row.dataset.id);
-    if (!confirm(`Delete the ${t.symbol} demo trade? Its money goes back to demo cash as if it never happened.`)) return;
-    try {
-      await withBusy(b, "…", () => del(`/api/positions/${t.id}`));
-    } catch (err) { return rowMessage(row, err.message); }
-    notice(`${t.symbol} demo trade deleted.`);
-    loadDemo(true);
-  }));
-  $("demo").querySelectorAll("[data-act=sell]").forEach((b) => b.addEventListener("click", async () => {
-    const row = b.closest(".pos");
-    const t = data.trades.find((x) => String(x.id) === row.dataset.id);
-    if (!confirm(`Sell the ${t.symbol} demo trade now at the live price? It counts in your demo results.`)) return;
-    try {
-      await withBusy(b, "Selling…", () => post(`/api/positions/${t.id}/close`, {}));
-    } catch (err) { return rowMessage(row, err.message); }
-    notice(`${t.symbol} demo trade sold at the live price.`);
-    loadDemo(true);
-  }));
-  $("demo-reset-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const msg = e.target.querySelector(".form-msg");
-    const v = +$("demo-start").value;
-    if (!(v > 0)) { formMessage(msg, "Enter a starting balance above $0."); return $("demo-start").focus(); }
-    if (!confirm(`Reset the demo account to ${money(v, 0)}? All demo trades will be deleted.`)) return;
-    try {
-      await withBusy(e.target.querySelector("[type=submit]"), "Resetting…", () => post("/api/demo/reset", { start_balance: v }));
-    } catch (err) { return formMessage(msg, err.message); }
-    notice(`Demo account reset to ${money(v, 0)}.`);
-    loadAll(true);
-  });
-}
-
-// An error under one position row (for its Sell / Delete buttons).
-function rowMessage(row, text) {
-  let el = row.querySelector(":scope > .form-msg");
-  if (!el) {
-    el = document.createElement("div");
-    row.append(el);
-  }
-  formMessage(el, text);
-  setTimeout(() => el.remove(), 10000);  // then the live redraw can carry on
-}
-
-// The live redraw replaces the whole list, so it waits while you're using something inside it: keyboard focus
-// (not a mouse click, which leaves focus on the button), an open form, or an error you haven't read yet.
-// `force` redraws right after your own change.
+// The live redraw replaces a whole page, so it waits while you're using something inside it: keyboard focus (not a
+// mouse click, which leaves focus on the button) or an open form.
 const busyInside = (el) => {
   const f = document.activeElement;
   const typing = f && el.contains(f) && (f.matches(":focus-visible") || f.matches("input, select, textarea"));
-  return Boolean(typing || el.querySelector("form.row-form, .pos > .form-msg"));
+  return Boolean(typing || el.querySelector("form.row-form"));
 };
 
-async function loadDemo(force = false) {
-  if (!force && busyInside($("demo-view"))) return;
-  const wasOpen = document.querySelector("#demo details.reset")?.open;
-  renderDemo(await api("/api/demo"));
-  if (wasOpen) document.querySelector("#demo details.reset").open = true;
-}
-
-// ---------- Your portfolio (real money) ----------
-function renderPortfolio(data) {
-  state.portfolio = data;
+// ---------- Your OKX portfolio ----------
+function renderPortfolio(a) {
+  state.account = a;
   const s = state.status;
-  const connected = s?.account.configured;
-  const a = data.account;
-  const st = state.account?.status;
-
-  const extra = [];
-  if (a.connected) {
-    extra.push(stat("Cash (USDT, USDC)", money(a.cash)));
-    if (st?.funding_usd >= 1) extra.push(stat("Funding account", money(st.funding_usd), "not tradable until moved"));
-    if (st?.earn_usd >= 1) extra.push(stat("Earn", money(st.earn_usd), "not tradable until redeemed"));
-    if (a.outside_exchange >= 1) extra.push(stat(`Tracked outside ${EX()}`, money(a.outside_exchange), "entered by hand"));
+  const el = $("portfolio");
+  $("sync").hidden = !a.configured;
+  if (!a.configured) {
+    el.innerHTML = `<div class="connect"><b>Connect OKX (read-only)</b> so the app shows your balances, coins, stop orders and
+      trades. Add a read-only key on the <a href="#settings">Settings</a> page; it’s stored encrypted with your account.</div>`;
+    return;
   }
-  const panel = (a.connected || a.running || a.finished) ? accountPanel({
-    label: a.connected ? `${EX()} spot value (live)` : "Value of your open positions",
-    value: a.value, a, live: isLive(data.live_at), extraTiles: extra,
-  }) : "";
-
-  const rows = data.positions.map((p) => {
-    const manual = p.source !== "synced";
-    const remove = manual ? `<button type="button" class="btn small ghost" data-act="remove" aria-label="Delete the ${esc(p.symbol)} entry">✕</button>` : "";
-    if (p.status !== "open") return closedRow(p, { actions: remove });
-    const check = checkLabel(p.exchange_check);
-    const stopTag = connected && p.exchange_check === "ok"
-      ? (p.stop_order_kind === "trailing" ? `<span class="tag ok">✓ Trailing stop order</span>`
-        : p.stop_order_price ? `<span class="tag ok">✓ Stop order at ${price(p.stop_order_price)}</span>` : `<span class="tag bad">No stop order</span>`) : "";
-    return openRow(p, {
-      tags: `${p.source === "paper" ? `<span class="tag">paper</span>` : ""}${check ? `<span class="tag ${check[0]}">${check[1]}</span>` : ""}${stopTag}`,
-      status: `<span class="advice ${esc(p.advice)}">${ADVICE_LABEL[p.advice] || "Hold"}</span>`,
-      actions: `${manual ? `<button type="button" class="btn small ${p.advice === "SELL" ? "danger" : "ghost"}" data-act="sold" aria-label="I sold ${esc(p.symbol)}">I sold</button>` : ""}${remove}`,
-      extraDetails: p.advice === "SELL" || p.advice === "TAKE_PROFIT" ? ` · <a href="${esc(p.trade_url)}" target="_blank" rel="noopener">Sell on ${EX()}</a>` : "",
-    });
-  }).join("");
-
-  $("portfolio").innerHTML = panel + (rows || `<div class="empty">No positions yet. ${connected
-    ? `Coins you buy on ${EX()} appear here automatically.`
-    : `Buy a swing copy and mark it with “I bought it”, or connect ${EX()} so the app tracks it for you.`}</div>`);
-  applyDynamicStyles($("portfolio"));
-  $("real-types").innerHTML = resultsTable(data.results_by_type || {}, "Results by type");
-
-  $("portfolio").querySelectorAll("[data-act]").forEach((b) => b.addEventListener("click", async () => {
-    const row = b.closest(".pos");
-    const id = row.dataset.id;
-    const pos = data.positions.find((x) => String(x.id) === id);
-    if (b.dataset.act === "sold") return openSoldForm(row, pos);
-    if (b.dataset.act === "remove") {
-      if (!confirm(`Delete the ${pos.symbol} entry? It won’t count in your history.`)) return;
-      try {
-        await withBusy(b, "…", () => del(`/api/positions/${id}`));
-      } catch (err) { return rowMessage(row, err.message); }
-      notice(`${pos.symbol} entry deleted.`);
-      await loadAll(true);
-    }
-  }));
-
-  // Connection card / hints
-  $("sync").hidden = !connected;
-  if (!connected) {
-    $("connect").innerHTML = `
-      <div class="connect"><b>Connect OKX (read-only)</b> so the app sees what you hold, your trades and your stop orders.
-        Add your read-only OKX key on the <a href="#settings">Settings</a> page. It’s stored encrypted with your account.</div>`;
-  } else if (!s.account.ok && s.account.error) {
-    $("connect").innerHTML = `<div class="connect error"><b>${EX()} connection problem:</b> ${esc(s.account.error)}</div>`;
-  } else if (s.bankroll.spot_empty) {
-    const elsewhere = (st?.funding_usd || 0) + (st?.earn_usd || 0);
-    $("connect").innerHTML = `<div class="connect"><b>${EX()} connected.</b> Your trading account is empty, so swing copies are sized
-      from the fallback bankroll on the <a href="#settings">Settings</a> page.${elsewhere >= 10 ? ` You have ${money(elsewhere)} in your ${st.funding_usd ? "Funding account" : ""}${st.funding_usd && st.earn_usd ? " and " : ""}${st.earn_usd ? "Simple Earn" : ""}.
-      To trade it, ${st.funding_usd ? "on OKX go to Assets → Transfer, from Funding to Trading" : "redeem it from Earn first"}.` : ""}</div>`;
-  } else if (s.account.can_trade) {
-    $("connect").innerHTML = `<div class="connect">Your ${EX()} key can place trades. The app only reads, so a read-only key is safer: replace it on the <a href="#settings">Settings</a> page.</div>`;
-  } else {
-    $("connect").innerHTML = "";
-  }
-
-  const trades = state.account?.trades || [];
-  $("trades-box").hidden = !trades.length;
-  $("trades").innerHTML = trades.length ? `<div class="table-wrap"><table>
-    <thead><tr><th>Date</th><th>Pair</th><th>Side</th><th class="num">Price</th><th class="num">Amount</th><th class="num">Total</th></tr></thead>
-    <tbody>${trades.map((t) => `<tr><td>${new Date(t.time).toLocaleString()}</td><td>${esc(t.pair)}</td>
-      <td class="${t.is_buyer ? "up" : "down"}">${t.is_buyer ? "Buy" : "Sell"}</td><td class="num">${price(t.price)}</td>
-      <td class="num">${num(t.qty)}</td><td class="num">${money(t.quote_qty)}</td></tr>`).join("")}</tbody></table></div>` : "";
-}
-
-// "I sold": the sell price, typed with a dot or a comma (1.23 or 1,23), checked before anything is saved.
-function openSoldForm(row, pos) {
-  const open = row.querySelector("form.row-form");
-  if (open) return open.price.focus();
-  const form = document.createElement("form");
-  form.className = "row-form";
-  form.noValidate = true;
-  form.innerHTML = `
-    <label>Sell price for ${esc(pos.symbol)} <input type="text" name="price" inputmode="decimal" autocomplete="off"
-      spellcheck="false" value="${orderPrice(pos.last_price || pos.entry_price)}" /></label>
-    <button class="btn small" type="submit">Save sale</button>
-    <button class="btn small ghost" type="button" data-act="cancel">Cancel</button>
-    <span class="form-msg" role="status"></span>`;
-  row.append(form);
-  form.price.select();
-  form.querySelector("[data-act=cancel]").addEventListener("click", () => form.remove());
-  form.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const msg = form.querySelector(".form-msg");
-    const v = parseNum(form.price.value);
-    if (!(v > 0)) { formMessage(msg, "Enter the price you sold at, for example 1.23 or 1,23."); return form.price.focus(); }
-    try {
-      await withBusy(form.querySelector("[type=submit]"), "Saving…", () => post(`/api/positions/${pos.id}/close`, { exit_price: v }));
-    } catch (err) { return formMessage(msg, err.message); }
-    notice(`${pos.symbol} marked as sold at ${price(v)}.`);
-    form.remove();
-    await loadAll(true);
-  });
-}
-
-async function loadPortfolio(force = false) {
-  if (!force && busyInside($("real-view"))) return;
-  renderPortfolio(await api("/api/portfolio"));
-}
-
-// ---------- Alerts ----------
-let alertsKey = null;
-async function loadAlerts() {
-  const alerts = await api("/api/alerts");
-  // #alerts is a live region: only redraw when the list really changed, so nothing is read out twice.
-  const key = alerts.map((a) => a.id).join(",");
-  if (key !== alertsKey) {
-    alertsKey = key;
-    $("alerts").innerHTML = alerts.map((a) => `
-      <div class="alert ${esc(a.level)}" data-id="${a.id}">
-        <span>${esc(a.message)}</span><button type="button" class="btn small ghost" data-act="dismiss" aria-label="Dismiss: ${esc(a.message)}">Dismiss</button>
-      </div>`).join("");
-    $("alerts").querySelectorAll("[data-act=dismiss]").forEach((b) => b.addEventListener("click", async () => {
-      try {
-        await withBusy(b, "…", () => post(`/api/alerts/${b.closest(".alert").dataset.id}/seen`));
-      } catch (err) { return notice(err.message, "error"); }
-      loadAlerts();
-    }));
-  }
-  const shown = new Set(store.get("notified", []));
-  const fresh = alerts.filter((a) => !shown.has(a.id) && a.level !== "warning");
-  if (fresh.length && "Notification" in window && Notification.permission === "granted") {
-    fresh.forEach((a) => new Notification("Copy Signals", { body: a.message }));
-  }
-  alerts.forEach((a) => shown.add(a.id));
-  store.set("notified", [...shown].slice(-500));
-}
-
-// ---------- Track record ----------
-async function loadPerformance() {
-  const perf = await api("/api/performance");
-  const o = perf.overall;
-  const kpi = (label, value, sub = "") => `<div class="kpi"><small>${label}</small><b>${value}</b>${sub ? `<span class="vs">${sub}</span>` : ""}</div>`;
-  $("performance").innerHTML = `
-    <div class="kpis">
-      ${kpi("Closed trades", o.trades || 0, perf.since ? `since ${date(perf.since)}` : "none yet")}
-      ${kpi("Won", o.trades ? `${Math.round(o.win_rate * 100)}%` : "–", "after fees")}
-      ${kpi("Average per trade", o.trades ? signed(o.avg_net, pct(o.avg_net, 2)) : "–", "after fees")}
-      ${kpi("BTC over the same days", o.avg_btc == null ? "–" : signed(o.avg_btc, pct(o.avg_btc, 2)), "average")}
+  const st = a.status || {};
+  const problem = s && !s.account.ok && s.account.error
+    ? `<div class="connect error"><b>${EX()} connection problem:</b> ${esc(s.account.error)}</div>` : "";
+  const tradeKey = st.can_trade ? `<div class="connect">Your ${EX()} key can place trades. The app only reads, so a read-only
+    key is safer: replace it on the <a href="#settings">Settings</a> page.</div>` : "";
+  const coins = a.holdings.reduce((sum, h) => sum + (h.value_usd || 0), 0);
+  const hero = `<div class="card hero">
+    <div class="hero-top"><p class="card-title">${EX()} trading account</p><span class="spacer"></span>
+      <span class="muted small">${st.synced_at ? `synced ${esc(ago(st.synced_at))}` : "not synced yet"}</span></div>
+    <div class="value">${money(st.total_usd ?? 0, 2)}</div>
+    <div class="stats">
+      ${stat("Cash (USDT, USDC)", money(st.cash_usd ?? 0))}
+      ${stat("Coins", money(coins), `${a.holdings.length} held`)}
+      ${st.funding_usd >= 1 ? stat("Funding account", money(st.funding_usd), "not tradable until moved") : ""}
+      ${st.earn_usd >= 1 ? stat("Earn", money(st.earn_usd), "not tradable until redeemed") : ""}
+      ${stat("Your fee", st.fee_rate != null ? `${fixed(st.fee_rate * 100, 3)}%` : "–", "taker, as OKX reports it")}
     </div>
-    <div class="card"><p class="card-title">Being followed now</p>
-      ${perf.open.length ? `<div class="exiting">${perf.open.map((t) => `<div class="exit-item">${coinIcon(t.symbol)}<div><b>${esc(t.symbol)}</b>
-        <span class="muted small">${signed(t.net_now, pct(t.net_now, 2))} now</span></div></div>`).join("")}</div>`
-        : `<p class="muted">Nothing open. A paper trade opens as soon as a coin becomes a swing copy.</p>`}</div>
-    ${perf.recent.length ? `<div class="card"><p class="card-title">Recently closed</p><div class="table-wrap"><table>
-      <thead><tr><th>Coin</th><th>Dates</th><th>Why it closed</th><th class="num">Result after fees</th><th class="num">BTC same days</th></tr></thead>
-      <tbody>${perf.recent.map((t) => `<tr><td>${esc(t.symbol)}</td><td>${date(t.opened_at)} – ${date(t.closed_at)}</td>
-        <td>${esc(REASON_TEXT[t.exit_reason] || t.exit_reason)}</td><td class="num">${signed(t.net_return, pct(t.net_return, 2))}</td>
-        <td class="num">${t.btc_return == null ? "–" : signed(t.btc_return, pct(t.btc_return, 2))}</td></tr>`).join("")}</tbody></table></div></div>`
-      : `<div class="empty">No trades have closed yet. Results appear when the copied trader sells, a trade hits its safety stop, or 30 days pass.</div>`}`;
+  </div>`;
+  const holdings = a.holdings.length ? `<div class="card"><p class="card-title">Coins</p><div class="table-wrap"><table>
+    <thead><tr><th>Coin</th><th class="num">Amount</th><th class="num">Price</th><th class="num">Value</th>
+      <th class="num">Average cost</th><th class="num">Result</th><th>Stop order</th></tr></thead>
+    <tbody>${a.holdings.map((h) => {
+      const res = h.avg_cost ? h.price / h.avg_cost - 1 : null;
+      const stop = h.stop_kind === "trailing" ? `<span class="tag ok">Trailing stop</span>`
+        : h.stop_price ? `<span class="tag ok">Stop at ${price(h.stop_price)}</span>` : `<span class="tag bad">None</span>`;
+      return `<tr><td>${coinIcon(h.coin)} ${esc(h.coin)}</td><td class="num">${num(h.qty)}</td><td class="num">${price(h.price)}</td>
+        <td class="num">${money(h.value_usd)}</td><td class="num">${h.avg_cost ? price(h.avg_cost) : "–"}</td>
+        <td class="num">${res == null ? "–" : signed(res, pct(res, 1))}</td><td>${stop}</td></tr>`;
+    }).join("")}</tbody></table></div></div>`
+    : `<div class="empty">No coins in your ${EX()} trading account right now${st.funding_usd >= 10
+      ? `. You have ${money(st.funding_usd)} in your Funding account: on OKX, Assets → Transfer moves it to Trading` : ""}.</div>`;
+  const orders = a.orders.length ? `<div class="card"><p class="card-title">Open orders</p><div class="table-wrap"><table>
+    <thead><tr><th>Pair</th><th>Kind</th><th class="num">Trigger</th><th class="num">Price</th><th class="num">Amount</th></tr></thead>
+    <tbody>${a.orders.map((o) => `<tr><td>${esc(o.pair)}</td><td>${esc(o.kind)}</td><td class="num">${price(o.stop_price)}</td>
+      <td class="num">${price(o.price)}</td><td class="num">${num(o.qty)}</td></tr>`).join("")}</tbody></table></div></div>` : "";
+  const trades = a.trades.length ? `<details class="card"><summary>Recent ${EX()} trades</summary><div class="table-wrap"><table>
+    <thead><tr><th>Date</th><th>Pair</th><th>Side</th><th class="num">Price</th><th class="num">Amount</th><th class="num">Total</th></tr></thead>
+    <tbody>${a.trades.map((t) => `<tr><td>${new Date(t.time).toLocaleString()}</td><td>${esc(t.pair)}</td>
+      <td class="${t.is_buyer ? "up" : "down"}">${t.is_buyer ? "Buy" : "Sell"}</td><td class="num">${price(t.price)}</td>
+      <td class="num">${num(t.qty)}</td><td class="num">${money(t.quote_qty)}</td></tr>`).join("")}</tbody></table></div></details>` : "";
+  el.innerHTML = problem + tradeKey + hero + holdings + orders + trades;
+}
+
+async function loadPortfolio() {
+  renderPortfolio(await api("/api/account"));
 }
 
 // ---------- Status ----------
-// (The bankroll used to size swing copies when OKX isn't connected is set on the Settings page.)
-
-// Screen readers hear the status only when it changes kind (updating → live → offline), not every "updated 2 min ago".
+// Screen readers hear the status only when it changes kind (live → offline), not every "updated 2 min ago".
 let lastStatusKind = "";
 function announceStatus(kind, text) {
   if (kind === lastStatusKind) return;
@@ -594,8 +80,6 @@ function announceStatus(kind, text) {
   $("status-live").textContent = text;
 }
 
-let wasRefreshing = false;
-let lastUpdatedAt = null;
 async function poll() {
   let s;
   try { s = await api("/api/status"); } catch {
@@ -608,16 +92,9 @@ async function poll() {
     showForcedPasswordChange(s.user.username);
     return s;
   }
-  const modeChanged = state.status && state.status.demo_mode !== s.demo_mode;
   state.status = s;
-  state.bankroll = s.bankroll;
-  renderMode(s);
-  if (modeChanged) loadAll();
-  if (s.refreshing) {
-    $("status-dot").className = "dot idle";
-    $("status-text").textContent = "Updating…";
-    announceStatus("updating", "Updating data…");
-  } else if (s.updated_at) {
+  renderUser(s);
+  if (s.updated_at) {
     const failing = s.errors.map((e) => e.source).join(", ");
     $("status-dot").className = s.errors.length ? "dot err" : "dot";
     $("status-text").textContent = `Live · updated ${ago(s.updated_at)}` + (s.errors.length ? ` · ${failing} failing` : "");
@@ -627,32 +104,7 @@ async function poll() {
     $("status-text").textContent = "Getting the first data…";
     announceStatus("first", "Getting the first data…");
   }
-  // New data arrives every minute (and after a full refresh): redraw the pages when it does.
-  if ((wasRefreshing && !s.refreshing) || (lastUpdatedAt && s.updated_at !== lastUpdatedAt)) loadAll();
-  wasRefreshing = s.refreshing;
-  lastUpdatedAt = s.updated_at;
   return s;
-}
-
-// `force`: redraw the portfolio views even if you're using something in them (right after your own change).
-async function loadAll(force = false) {
-  try {
-    if (!state.status) await poll();
-    const [copies, portfolio, account, demo] = await Promise.all([
-      api("/api/copies"), api("/api/portfolio"), api("/api/account"), api("/api/demo")]);
-    state.account = account;
-    state.demo = demo;
-    state.portfolio = portfolio;
-    renderCopies(copies);
-    if (force || !busyInside($("demo-view"))) renderDemo(demo);
-    if (force || !busyInside($("real-view"))) renderPortfolio(portfolio);
-    await Promise.all([loadAlerts(), loadPerformance()]);
-    $("load-error").hidden = true;
-  } catch (e) {
-    // Shown above every page, so it's seen wherever you are.
-    $("load-error").hidden = false;
-    $("load-error").querySelector("span").textContent = `Couldn’t load the latest data: ${e.message} It tries again at the next update.`;
-  }
 }
 
 // A temporary password (e.g. the first admin's) must be replaced before anything else works.
@@ -660,7 +112,7 @@ function showForcedPasswordChange(username) {
   if ($("forced-pw")) return;
   document.querySelectorAll(".side-nav, .tabbar").forEach((n) => { n.hidden = true; });
   document.querySelectorAll("#account-menu a").forEach((a) => { a.hidden = true; });  // only Log out stays
-  document.querySelectorAll(".page, #alerts").forEach((el) => { el.hidden = true; });
+  document.querySelectorAll(".page").forEach((el) => { el.hidden = true; });
   const box = document.createElement("section");
   box.id = "forced-pw";
   box.innerHTML = `
@@ -690,15 +142,7 @@ function showForcedPasswordChange(username) {
   });
 }
 
-// Demo on: the portfolio page shows the demo account and buy buttons become demo buys.
-function renderMode(s) {
-  const demo = Boolean(s.demo_mode);
-  document.body.classList.toggle("demo-mode", demo);
-  $("demo-badge").hidden = !demo;
-  if (document.activeElement !== $("demo-toggle")) $("demo-toggle").checked = demo;
-  $("real-view").hidden = demo;
-  $("demo-view").hidden = !demo;
-  document.querySelectorAll(".portfolio-label").forEach((el) => { el.textContent = demo ? "Demo portfolio" : "Portfolio"; });
+function renderUser(s) {
   $("user-name").textContent = s.user.username;
   $("avatar").textContent = s.user.username.slice(0, 1);
   $("account-who").textContent = `Signed in as ${s.user.username}${s.user.role === "admin" ? " (admin)" : ""}`;
@@ -754,19 +198,6 @@ $("account").addEventListener("focusout", (e) => {
   if (e.relatedTarget && !$("account").contains(e.relatedTarget)) setAccountMenu(false);
 });
 
-$("demo-toggle").addEventListener("change", async (e) => {
-  try {
-    await put("/api/settings/prefs", { demo_mode: e.target.checked });
-  } catch (err) {
-    e.target.checked = !e.target.checked;
-    notice(err.message, "error");
-    return;
-  }
-  notice(e.target.checked ? "Demo on: showing your demo account." : "Demo off: showing your real account.");
-  await poll();
-  loadAll(true);
-});
-
 $("logout").addEventListener("click", async () => {
   $("logout").disabled = true;
   $("logout").textContent = "Logging out…";
@@ -779,7 +210,7 @@ $("sync").addEventListener("click", async () => {
     notice("Synced with OKX.");
   } catch (err) { notice(err.message, "error"); }
   await poll();
-  loadAll(true);
+  loadPortfolio().catch(() => {});
 });
 
 // Skip link: focus the page content (a plain #content link would be read as a page change by the menu).
@@ -793,13 +224,12 @@ if ("Notification" in window && Notification.permission === "default") {
 }
 
 // ---------- Menu ----------
-const PAGES = ["bot", "copies", "portfolio", "record", "settings", "admin", "how"];
-const PAGE_LOADERS = {};  // settings.js and admin.js register loaders here; they get the part after "/" (e.g. #admin/users)
+const PAGES = ["bot", "longshort", "portfolio", "settings", "admin", "how"];
+const PAGE_LOADERS = {};  // each page's script registers a loader here; it gets the part after "/" (e.g. #admin/users)
+PAGE_LOADERS.portfolio = () => loadPortfolio().catch((e) => { $("portfolio").innerHTML = `<div class="empty">${esc(e.message)}</div>`; });
 function go(route) {
   let [page, sub] = String(route || "").split("/");
-  if (page === "demo") page = "portfolio";
-  if (page === "picks" || page === "rising") page = "copies";  // old bookmarks
-  if (!PAGES.includes(page)) { page = "bot"; sub = undefined; }
+  if (!PAGES.includes(page)) { page = "bot"; sub = undefined; }  // includes old bookmarks (copies, record, demo)
   const hash = sub ? `#${page}/${sub}` : `#${page}`;
   if (location.hash !== hash) history.replaceState(null, "", hash);
   if (PAGE_LOADERS[page]) PAGE_LOADERS[page](sub);
@@ -817,16 +247,11 @@ function go(route) {
   window.scrollTo(0, 0);
 }
 window.addEventListener("hashchange", () => go(location.hash.slice(1)));
+const pageOpen = (name) => !document.querySelector(`.page[data-page="${name}"]`).hidden && !document.hidden;
 
 poll().then((s) => {
   if (s?.user.must_change_password) return;
   go(location.hash.slice(1) || store.get("page", "bot"));
-  loadAll();
 });
-setInterval(poll, 5000);
-setInterval(loadAlerts, 30000);
-// Live: re-draw open positions and demo trades every 5 seconds while any are running.
-setInterval(() => {
-  if (demoMode() && state.demo?.account.running) loadDemo().catch(() => {});
-  if (!demoMode() && state.portfolio?.account.running) loadPortfolio().catch(() => {});
-}, 5000);
+setInterval(poll, 15000);
+setInterval(() => { if (pageOpen("portfolio") && !busyInside($("portfolio"))) loadPortfolio().catch(() => {}); }, 60000);

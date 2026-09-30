@@ -3,89 +3,71 @@
 async function loadSettings() {
   const s = await api("/api/settings");
   const okx = s.okx;
-  $("settings").innerHTML = `<div class="settings-grid">
-    <div class="card">
-      <h3>Your account</h3>
-      <p class="muted">Signed in as <b>${esc(s.user.username)}</b> (${esc(s.user.role)}).</p>
-      <form id="pw-form" class="form" autocomplete="on">
-        <input type="text" name="username" value="${esc(s.user.username)}" autocomplete="username" hidden />
-        <label>Current password <input type="password" name="current" autocomplete="current-password" required /></label>
-        <label>New password <input type="password" name="new" autocomplete="new-password" minlength="12" required /></label>
-        <label>Repeat new password <input type="password" name="repeat" autocomplete="new-password" minlength="12" required /></label>
-        <p class="muted small">At least 12 characters. Changing it logs you out everywhere else.</p>
-        <div class="actions"><button class="btn small" type="submit">Change password</button><span class="form-msg" id="pw-msg" role="status"></span></div>
-      </form>
-    </div>
-
-    <div class="card">
-      <h3>Two-step login</h3>
-      <div id="totp-box">${s.user.totp_enabled
-        ? `<p><span class="tag ok">On</span> Logging in asks for a code from your authenticator app.</p>
-           <form id="totp-off" class="form">
-             <label>Password <input type="password" name="password" autocomplete="current-password" required /></label>
-             <label>Code from your app <input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6"
-               pattern="[0-9]{6}" spellcheck="false" required /></label>
-             <div class="actions"><button class="btn small danger" type="submit">Turn off</button><span class="form-msg" id="totp-msg" role="status"></span></div>
-           </form>`
-        : `<p class="muted">Off. With it on, logging in also needs a 6-digit code from an authenticator app
-             (Google Authenticator, Microsoft Authenticator, 1Password…). Recommended for admin accounts.</p>
-           <div class="actions"><button type="button" class="btn small" id="totp-setup">Set up two-step login</button>
-             <span class="form-msg" id="totp-setup-msg" role="status"></span></div>
-           <div id="totp-setup-box"></div>`}</div>
-    </div>
-
-    <div class="card">
-      <h3>OKX connection (read-only)</h3>
-      ${okx.configured
-        ? `<p><span class="tag ok">Connected</span> Key ending <code>${esc(okx.key_hint)}</code> · ${okx.region === "eea" ? "European account (my.okx.com)" : "Global account"}
-             · saved ${okx.updated_at ? esc(dateTime(okx.updated_at)) : ""}</p>
-           <div class="actions"><button type="button" class="btn small ghost" id="okx-test">Test connection</button>
-             <button type="button" class="btn small ghost" id="okx-remove">Remove key</button><span class="form-msg" id="okx-msg" role="status"></span></div>
-           <details><summary>Replace the key</summary>${okxForm(okx.region)}</details>`
-        : `<p class="muted">Not connected. On OKX (in Europe: my.okx.com) go to Profile → API → Create API key, choose a
-             passphrase and tick only <b>Read</b>. The key is tested before it’s saved, stored encrypted, and a key that can
-             withdraw is refused.</p>${okxForm(okx.region)}`}
-    </div>
-
-    <div class="card">
-      <h3>Bankroll for sizing swing copies</h3>
-      <p class="muted">How much money each swing copy’s suggested amount is based on (5% of it per copy). ${state.bankroll?.source === "exchange"
-        ? `Right now it’s your OKX trading balance (<b>${money(state.bankroll.amount, 0)}</b>), so this number is only used if OKX is disconnected or your trading account is empty.`
-        : `OKX isn’t connected (or its trading account is empty), so this number is used.`}
-        The demo account always uses its own balance.</p>
-      <form id="bankroll-form" class="form inline" novalidate>
-        <label>Bankroll $ <input type="number" name="bankroll" min="1" step="any"
-          value="${Math.round(s.bankroll ?? s.defaults.bankroll)}" /></label>
-        <button class="btn small" type="submit">Save</button><span class="form-msg" id="bankroll-msg" role="status"></span>
-      </form>
-    </div>
-
-    <div class="card">
-      <h3>Your OKX fees</h3>
-      <p class="muted">Used for every swing copy’s result after fees, for demo trades and for the trend bot. Market orders and
-        triggered stops pay the taker fee. Find yours on OKX under Profile → Fee rates (spot).</p>
-      <form id="fees-form" class="form inline">
-        <label>Maker % <input type="number" name="maker" step="0.001" min="0" max="1"
-          value="${s.fees.maker != null ? +(s.fees.maker * 100).toFixed(4) : ""}" placeholder="${+(s.fees.default_maker * 100).toFixed(3)}" /></label>
-        <label>Taker % <input type="number" name="taker" step="0.001" min="0" max="1"
-          value="${s.fees.taker != null ? +(s.fees.taker * 100).toFixed(4) : ""}" placeholder="${+(s.fees.default_taker * 100).toFixed(3)}" /></label>
-        <button class="btn small" type="submit">Save</button><span class="form-msg" id="fees-msg" role="status"></span>
-      </form>
-      <p class="muted small">${s.fees.taker != null ? "Using your fees." : `Not set: using ${num(s.fees.default_taker * 100, 3)}% taker.`}
-        ${s.fees.okx_reported ? ` OKX’s API reports ${num(s.fees.okx_reported * 100, 3)}% for your account (some coins are in a higher fee group).` : ""}</p>
-    </div>
-
-    <div class="card">
-      <h3>Phone notifications</h3>
-      <p class="muted">Get sell alerts and finished demo trades on your phone: install the ntfy app, subscribe to a
-        hard-to-guess topic, and paste its address here (for example https://ntfy.sh/your-secret-topic).</p>
-      <form id="notify-form" class="form">
-        <label>Notification address <input type="url" name="url" placeholder="https://ntfy.sh/your-secret-topic"
-          autocomplete="off" spellcheck="false" autocapitalize="none" value="" /></label>
-        <p class="muted small">${s.notify_url_set ? "An address is saved. Enter a new one to replace it." : "No address saved."}</p>
-        <div class="actions"><button class="btn small" type="submit">Save</button><span class="form-msg" id="notify-msg" role="status"></span></div>
-      </form>
-    </div></div>`;
+  // One row per setting: what it is on the left, the controls on the right (stacked on phones).
+  const row = (title, help, body) => `<div class="set-row"><div class="set-label"><h4>${title}</h4>${help ? `<p>${help}</p>` : ""}</div>
+    <div class="set-body">${body}</div></div>`;
+  const group = (title, rows) => `<section class="set-group"><h3>${title}</h3><div class="card set-card">${rows.join("")}</div></section>`;
+  $("settings").innerHTML = `<div class="settings">
+    ${group("Trading", [
+      row("OKX spot fees", "Used for the trend bot’s trades (it pays the taker fee). The long/short test uses OKX futures fees: 0.05% plus 0.05% slippage per trade. On OKX: Profile → Fee rates.", `
+        <form id="fees-form" class="form inline">
+          <label>Maker % <input type="number" name="maker" step="0.001" min="0" max="1"
+            value="${s.fees.maker != null ? +(s.fees.maker * 100).toFixed(4) : ""}" placeholder="${+(s.fees.default_maker * 100).toFixed(3)}" /></label>
+          <label>Taker % <input type="number" name="taker" step="0.001" min="0" max="1"
+            value="${s.fees.taker != null ? +(s.fees.taker * 100).toFixed(4) : ""}" placeholder="${+(s.fees.default_taker * 100).toFixed(3)}" /></label>
+          <button class="btn small" type="submit">Save</button><span class="form-msg" id="fees-msg" role="status"></span>
+        </form>
+        <p class="muted small">${s.fees.taker != null ? "Using your fees." : `Not set: using ${num(s.fees.default_taker * 100, 3)}% taker.`}
+          ${s.fees.okx_reported ? ` OKX’s API reports ${num(s.fees.okx_reported * 100, 3)}% for your account (some coins are in a higher fee group).` : ""}</p>`)
+    ])}
+    ${group("OKX connection", [
+      row("Read-only API key", "Lets the app mirror your real OKX balances, trades and stop orders. It can never place orders or withdraw.",
+        okx.configured
+          ? `<p><span class="tag ok">Connected</span> Key ending <code>${esc(okx.key_hint)}</code> · ${okx.region === "eea" ? "European account (my.okx.com)" : "Global account"}
+               ${okx.updated_at ? ` · saved ${esc(dateTime(okx.updated_at))}` : ""}</p>
+             <div class="actions"><button type="button" class="btn small ghost" id="okx-test">Test connection</button>
+               <button type="button" class="btn small ghost" id="okx-remove">Remove key</button><span class="form-msg" id="okx-msg" role="status"></span></div>
+             <details class="set-more"><summary>Replace the key</summary>${okxForm(okx.region)}</details>`
+          : `<p class="muted small">On OKX (in Europe: my.okx.com): Profile → API → Create API key, choose a passphrase and tick
+               only <b>Read</b>. It’s tested before it’s saved and stored encrypted; a key that can withdraw is refused.</p>
+             ${okxForm(okx.region)}`),
+    ])}
+    ${group("Alerts", [
+      row("Phone notifications", "Sell alerts and finished demo trades on your phone. Install the ntfy app, subscribe to a hard-to-guess topic and paste its address.", `
+        <form id="notify-form" class="form">
+          <label>Notification address <input type="url" name="url" placeholder="https://ntfy.sh/your-secret-topic"
+            autocomplete="off" spellcheck="false" autocapitalize="none" value="" /></label>
+          <p class="muted small">${s.notify_url_set ? `<span class="tag ok">On</span> An address is saved. Enter a new one to replace it.` : "No address saved."}</p>
+          <div class="actions"><button class="btn small" type="submit">Save</button><span class="form-msg" id="notify-msg" role="status"></span></div>
+        </form>`),
+    ])}
+    ${group("Security", [
+      row("Password", `Signed in as <b>${esc(s.user.username)}</b> (${esc(s.user.role)}). At least 12 characters; changing it logs you out everywhere else.`, `
+        <details class="set-more" id="pw-box"><summary class="btn small ghost">Change password</summary>
+          <form id="pw-form" class="form" autocomplete="on">
+            <input type="text" name="username" value="${esc(s.user.username)}" autocomplete="username" hidden />
+            <label>Current password <input type="password" name="current" autocomplete="current-password" required /></label>
+            <label>New password <input type="password" name="new" autocomplete="new-password" minlength="12" required /></label>
+            <label>Repeat new password <input type="password" name="repeat" autocomplete="new-password" minlength="12" required /></label>
+            <div class="actions"><button class="btn small" type="submit">Save new password</button><span class="form-msg" id="pw-msg" role="status"></span></div>
+          </form>
+        </details>`),
+      row("Two-step login", "A 6-digit code from an authenticator app (Google Authenticator, 1Password…) on every login. Recommended for admins.",
+        `<div id="totp-box">${s.user.totp_enabled
+          ? `<p><span class="tag ok">On</span> Logging in asks for a code from your authenticator app.</p>
+             <details class="set-more"><summary class="btn small ghost">Turn off</summary>
+             <form id="totp-off" class="form">
+               <label>Password <input type="password" name="password" autocomplete="current-password" required /></label>
+               <label>Code from your app <input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6"
+                 pattern="[0-9]{6}" spellcheck="false" required /></label>
+               <div class="actions"><button class="btn small danger" type="submit">Turn off</button><span class="form-msg" id="totp-msg" role="status"></span></div>
+             </form></details>`
+          : `<p><span class="tag">Off</span></p>
+             <div class="actions"><button type="button" class="btn small" id="totp-setup">Set up two-step login</button>
+               <span class="form-msg" id="totp-setup-msg" role="status"></span></div>
+             <div id="totp-setup-box"></div>`}</div>`),
+    ])}
+  </div>`;
   bindSettings(s);
 }
 
@@ -187,17 +169,6 @@ function bindSettings(s) {
     } catch (err) { return formMessage($("okx-msg"), err.message); }
     notice("OKX key removed.");
     loadSettings();
-  });
-
-  $("bankroll-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const v = +e.target.bankroll.value;
-    if (!(v > 0)) { formMessage($("bankroll-msg"), "Enter an amount above $0."); return e.target.bankroll.focus(); }
-    try {
-      await withBusy(submitOf(e.target), "Saving…", () => put("/api/settings/prefs", { bankroll: v }));
-      formMessage($("bankroll-msg"), "Saved.", "ok");
-      loadAll();
-    } catch (err) { formMessage($("bankroll-msg"), err.message); }
   });
 
   $("fees-form").addEventListener("submit", async (e) => {

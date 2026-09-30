@@ -6,13 +6,9 @@ key that can withdraw.
 Each sync:
 1. Checks the key's permissions.
 2. Reads balances, open orders (including stop-loss / take-profit / trailing
-   stop orders), trades for every coin you hold or that the app is tracking,
-   and your real trading fee.
+   stop orders), trades for every coin you hold, and your real trading fee.
 3. Works out each holding's average cost from its trades and whether a
    stop-loss order protects it.
-4. Reconciles "My portfolio": coins you buy appear automatically (with the plan
-   of the swing copy that was live when you bought), positions you've sold close at
-   your actual sell price with your real fees, and mismatches are flagged.
 
 The OKX reader turns OKX's API into the normalized shapes in `Snapshot`;
 the bookkeeping after that is exchange-neutral, so another exchange could be
@@ -31,13 +27,10 @@ from urllib.parse import urlencode
 
 import httpx
 
-from . import portfolio
 from .market import OKX_DOMAINS, STABLES, Market
 
 log = logging.getLogger(__name__)
 DUST_USD = 10.0  # holdings worth less than this are ignored
-DEFAULT_FEE = 0.001
-SPREAD_SLIPPAGE = 0.001  # rough round-trip spread + slippage when there's no copy estimate
 
 
 class UnsafeKeyError(RuntimeError):
@@ -134,16 +127,11 @@ class ExchangeAccount:
 
     async def sync(self, client: httpx.AsyncClient, conn: sqlite3.Connection, markets: dict[str, Market], now: int,
                    user_id: int) -> dict:
-        """Mirror one user's account into user_holdings/user_trades/user_orders and reconcile their positions."""
+        """Mirror one user's account into user_holdings/user_trades/user_orders."""
         self.uid = user_id
         snap = await self.snapshot(client, markets)
         cash = sum(f + l for a, (f, l) in snap.balances.items() if a in STABLES and a != "EUR")
-
-        tracked = {r[0] for r in conn.execute(
-            "SELECT DISTINCT symbol FROM my_positions WHERE user_id = ? AND source != 'demo' "
-            "AND (status = 'open' OR closed_at >= ?)", (user_id, now - 7 * 86400))}
-        coins = [a for a in snap.balances if a in markets and a not in STABLES] + [c for c in tracked if c in markets]
-        coins = list(dict.fromkeys(coins))
+        coins = [a for a in snap.balances if a in markets and a not in STABLES]
         for coin in coins:
             pair = markets[coin].pair
             last = conn.execute("SELECT id FROM user_trades WHERE user_id = ? AND exchange = ? AND pair = ? "
@@ -162,7 +150,6 @@ class ExchangeAccount:
                               for o in snap.orders])
 
         holdings = self._holdings(conn, snap.balances, markets, coins, now)
-        self._reconcile(conn, holdings, markets, now, snap.fee_rate or DEFAULT_FEE)
         return {"exchange": self.name, "label": self.label, "cash_usd": cash,
                 "total_usd": cash + sum(h.value_usd or 0 for h in holdings), "funding_usd": snap.funding_usd,
                 "earn_usd": snap.earn_usd, "can_trade": snap.can_trade, "fee_rate": snap.fee_rate,
@@ -201,89 +188,6 @@ class ExchangeAccount:
                 )
                 out.append(h)
         return out
-
-    def _reconcile(self, conn, holdings: list[Holding], markets: dict[str, Market], now: int,
-                   fee_rate: float = DEFAULT_FEE) -> None:
-        held = {h.coin: h for h in holdings}
-        open_rows = conn.execute("SELECT * FROM my_positions WHERE user_id = ? AND status = 'open' AND source != 'demo'",
-                                 (self.uid,)).fetchall()
-        open_by_coin = {r["symbol"]: r for r in open_rows}
-
-        # Holdings not yet tracked -> start tracking with the plan of the swing copy live at buy time.
-        for coin, h in held.items():
-            if coin in open_by_coin:
-                continue
-            entry = h.avg_cost or h.price
-            opened = h.opened_at or now
-            plan = conn.execute(
-                "SELECT stop_price, target_price, hold_until, traders_at_entry, entry_price, cost_pct, style, trail_pct, "
-                "strength, features FROM pick_trades WHERE symbol = ? AND style = 'copy' AND opened_at <= ? + 3600 "
-                "AND (closed_at IS NULL OR closed_at >= ?) ORDER BY opened_at DESC LIMIT 1",
-                (coin, opened, opened)).fetchone()
-            plan_dict = None
-            if plan:  # re-base the copy's stop/target percentages on your actual entry
-                ratio = entry / plan["entry_price"]
-                plan_dict = {"stop_price": plan["stop_price"] * ratio, "target_price": plan["target_price"] * ratio,
-                             "hold_until": plan["hold_until"], "traders_at_entry": plan["traders_at_entry"],
-                             "style": plan["style"], "trail_pct": plan["trail_pct"], "strength": plan["strength"],
-                             "features": plan["features"]}
-            btc = markets.get("BTC")
-            pid = portfolio.open_position(conn, user_id=self.uid, market_key=f"perp:{coin}", symbol=coin,
-                                          entry_price=entry, size_usd=h.qty * entry, pick=None, now=opened, qty=h.qty,
-                                          source="synced", plan=plan_dict,
-                                          cost_pct=plan["cost_pct"] if plan else 2 * fee_rate + SPREAD_SLIPPAGE,
-                                          # BTC when the buy was first seen: within one refresh of the real buy.
-                                          btc_entry=btc.price if btc else None)
-            open_by_coin[coin] = conn.execute("SELECT * FROM my_positions WHERE id = ?", (pid,)).fetchone()
-
-        for coin, pos in open_by_coin.items():
-            h = held.get(coin)
-            with conn:
-                if h is None:
-                    if pos["source"] == "synced" or pos["exchange_check"] == "ok":
-                        m = markets.get(coin)
-                        exit_price = self._sell_price_since(conn, m, pos["opened_at"]) or pos["last_price"]
-                        btc = markets.get("BTC")
-                        portfolio.close_position(conn, pos["id"], exit_price, now, reason=f"sold on {self.label}",
-                                                 fees_usd=self._fees_usd(conn, m, coin, pos["opened_at"], markets),
-                                                 btc_price=btc.price if btc else None)
-                    else:
-                        conn.execute("UPDATE my_positions SET exchange_check = 'missing' WHERE id = ?", (pos["id"],))
-                    continue
-                qty_ok = pos["qty"] is None or abs(h.qty - pos["qty"]) <= 0.05 * max(h.qty, pos["qty"])
-                updates = {"exchange_check": "ok" if qty_ok else "qty_mismatch", "qty": h.qty}
-                if pos["source"] == "synced" and h.avg_cost:
-                    updates.update(entry_price=h.avg_cost, size_usd=h.qty * h.avg_cost)
-                stop = conn.execute("SELECT stop_price, stop_qty, stop_kind FROM user_holdings WHERE user_id = ? AND coin = ?",
-                                    (self.uid, coin)).fetchone()
-                protected = bool(stop and stop["stop_kind"] and (stop["stop_qty"] or 0) >= 0.9 * h.qty)
-                updates["stop_order_price"] = stop["stop_price"] if protected else None
-                updates["stop_order_kind"] = stop["stop_kind"] if protected else None
-                conn.execute(f"UPDATE my_positions SET {', '.join(f'{k} = ?' for k in updates)} WHERE id = ?",
-                             (*updates.values(), pos["id"]))
-                if not protected and pos["traders_at_entry"]:  # only for positions that follow a copy
-                    portfolio.raise_alert(conn, pos, "no_stop_order", "WATCH",
-                                          f"No stop-loss order on {self.label}. Place a stop sell at {pos['stop_price']:.6g}", now)
-
-    def _fees_usd(self, conn, market: Market | None, coin: str, since: int, markets: dict[str, Market]) -> float | None:
-        """Actual commission paid on this coin's buys and sells since the position opened, in USD.
-        Exchanges charge it in the quote coin, the bought coin, or their own token (e.g. OKB)."""
-        if not market:
-            return None
-        rows = conn.execute("SELECT price, commission, commission_asset FROM user_trades "
-                            "WHERE user_id = ? AND exchange = ? AND pair = ? AND time >= ?",
-                            (self.uid, self.name, market.pair, (since - 60) * 1000)).fetchall()
-        if not rows:
-            return None
-        return sum(c * p if a == coin else value_usd(a, c, markets) for p, c, a in rows)
-
-    def _sell_price_since(self, conn, market: Market | None, since: int) -> float | None:
-        if not market:
-            return None
-        row = conn.execute("SELECT SUM(quote_qty), SUM(qty) FROM user_trades "
-                           "WHERE user_id = ? AND exchange = ? AND pair = ? AND is_buyer = 0 AND time >= ?",
-                           (self.uid, self.name, market.pair, since * 1000)).fetchone()
-        return row[0] / row[1] if row and row[1] else None
 
 
 # --- OKX -----------------------------------------------------------------------

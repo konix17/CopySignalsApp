@@ -1,17 +1,13 @@
-"""OKX spot market data: what's buyable, how liquid, and whether it's trending.
+"""OKX spot market data: what's buyable, at what price, and how liquid.
 
 Public endpoints only (no key). Everything here is per coin traded against USDT.
 """
 
 import asyncio
-import math
-import statistics
 import time
 from dataclasses import dataclass
 
 import httpx
-
-from .sources.base import gather_limited
 
 UNIVERSE_TTL = 24 * 3600
 HISTORY_PAGE = 100  # OKX history-candles returns at most 100 rows per call
@@ -37,21 +33,6 @@ class Market:
     def spread(self) -> float:
         mid = (self.bid + self.ask) / 2
         return (self.ask - self.bid) / mid if mid else 1.0
-
-
-def round_trip_cost(market: Market, fee_rate: float, slippage: float) -> float:
-    """Buy and sell: fee + half the spread + slippage, each way."""
-    return 2 * (fee_rate + market.spread / 2 + slippage)
-
-
-def trend_from_closes(closes: list[float]) -> tuple[float | None, float | None, float | None, float | None]:
-    """closes: completed daily closes, oldest first. Returns (ma20, ma50, close 30 days ago, daily vol)."""
-    ma20 = statistics.fmean(closes[-20:]) if len(closes) >= 20 else None
-    ma50 = statistics.fmean(closes[-50:]) if len(closes) >= 50 else None
-    close30 = closes[-30] if len(closes) >= 30 else None
-    rets = [math.log(b / a) for a, b in zip(closes[-31:], closes[-30:]) if a > 0 and b > 0]
-    vol = statistics.stdev(rets) if len(rets) >= 7 else None
-    return ma20, ma50, close30, vol
 
 
 class Pacer:
@@ -120,22 +101,6 @@ class OkxSpot:
                                float(t["volCcy24h"] or 0),  # spot: 24h volume in the quote coin (USDT)
                                change_24h=last / open24 - 1 if open24 else None)
         return out
-
-    async def _candles(self, client: httpx.AsyncClient, pair: str, bar: str, limit: int) -> list[list]:
-        rows = await self._get(client, "/api/v5/market/candles", {"instId": pair, "bar": bar, "limit": limit})
-        # newest first -> oldest first; row[8] == "1" once the candle is finished
-        return [[int(r[0]), r[1], r[2], r[3], r[4], r[5], 0, r[7], r[8]] for r in reversed(rows)]
-
-    async def add_trends(self, client: httpx.AsyncClient, markets: dict[str, Market], coins: list[str]) -> None:
-        wanted = [c for c in dict.fromkeys(coins) if c in markets]
-        results = await gather_limited([self._candles(client, markets[c].pair, "1Dutc", 61) for c in wanted], limit=5)
-        for coin, rows in zip(wanted, results):
-            if isinstance(rows, BaseException):
-                continue
-            closes = [float(r[4]) for r in rows if r[8] == "1"]
-            m = markets[coin]
-            m.ma20, m.ma50, close30, m.daily_vol = trend_from_closes(closes)
-            m.ret30 = m.price / close30 - 1 if close30 else None
 
     async def prices(self, client: httpx.AsyncClient, pairs: list[str]) -> dict[str, float]:
         if not pairs:

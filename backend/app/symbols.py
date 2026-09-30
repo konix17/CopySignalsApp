@@ -19,3 +19,14 @@ def crypto_symbol(raw: str) -> str | None:
     if not symbol or symbol in NON_CRYPTO:
         return None
     return symbol
+
+
+def normalize_coin(coin: str) -> tuple[str | None, float]:
+    """Map a Hyperliquid coin to a cross-venue symbol and a price multiplier (used by the research scripts).
+
+    "kPEPE" is quoted per 1000 PEPE, so its price is divided by 1000.
+    Non-crypto markets (builder-deployed "xyz:TSLA" etc.) map to None.
+    """
+    if len(coin) > 1 and coin[0] == "k" and coin[1:].isupper():
+        return crypto_symbol(coin[1:]), 1 / 1000
+    return crypto_symbol(coin), 1.0

@@ -6,3 +6,5 @@ httpx
 argon2-cffi
 cryptography
 websockets
+numpy
+scikit-learn  # the long/short model (lsmodel.py)

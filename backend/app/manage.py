@@ -7,14 +7,20 @@
     ../.venv/bin/python -m app.manage import-okx-env <username>    (moves OKX_* keys from .env into the account)
     ../.venv/bin/python -m app.manage list-users
     ../.venv/bin/python -m app.manage backtest      (updates price history, then backtests every strategy; backtest.py)
+    ../.venv/bin/python -m app.manage ls-update     (long/short test: import data/market.db if there, fetch new days)
+    ../.venv/bin/python -m app.manage ls-train      (retrain the long/short model now; the app also does it monthly)
+    ../.venv/bin/python -m app.manage ls-backtest [YYYY-MM-DD]
+        (walk-forward backtest of the long/short model and paper book from that day, default 2022-07-01; the result
+         is shown on the Long/short page)
 """
 
 import asyncio
 import getpass
+import json
 import sys
 import time
 
-from . import backtest, db, history, trendbot, users
+from . import backtest, db, history, lsdata, lsmodel, trendbot, users
 from .config import ROOT, settings
 from .logs import audit
 from .security import SecretBox
@@ -51,9 +57,8 @@ def main(argv: list[str]) -> None:
             user = users.create(conn, args[0], _password(), role="admin", temporary=len(args) == 2)
         except users.UserError as e:
             sys.exit(str(e))
-        adopted = users.adopt_orphans(conn, user.id)
         audit(conn, "admin.user_created", username="(command line)", detail={"new_user": user.username, "role": "admin"})
-        print(f"Admin '{user.username}' created. Existing data moved to this account: {adopted}")
+        print(f"Admin '{user.username}' created.")
     elif cmd == "set-password" and len(args) == 1:
         row = users.by_name(conn, args[0])
         if not row:
@@ -99,6 +104,39 @@ def main(argv: list[str]) -> None:
         summary = trendbot.backtest_summary(okx, funding=history.load_funding(hist))
         print("\nThe trend bot on OKX prices:")
         print(backtest.format_table([summary["strategy"], *summary["hold"].values()]))
+    elif cmd == "ls-update" and not args:
+        hist = history.connect(settings.history_path)
+        lsdata.init(hist)
+        added = lsdata.import_research(hist, settings.research_market_db)
+        if added:
+            print(f"Imported {added:,} coin-days from {settings.research_market_db.name}.")
+        print("Fetching new days from Binance, Bybit and Deribit…")
+        print(asyncio.run(lsdata.update(hist)))
+    elif cmd == "ls-train" and not args:
+        hist = history.connect(settings.history_path)
+        started = time.monotonic()
+        model = lsmodel.train(lsmodel.load(hist, since=1_514_764_800))
+        path = settings.history_path.with_name("ls_model.pkl")
+        lsmodel.save(model, path)
+        info = {"trained_at": int(time.time()), "trained_through": model.trained_through, "rows": model.rows,
+                "seconds": round(time.monotonic() - started)}
+        db.set_pref(conn, "ls_model", json.dumps(info))
+        print(f"Model saved to {path} ({info})")
+    elif cmd == "ls-backtest" and len(args) <= 1:
+        start = int(time.mktime(time.strptime(args[0] if args else "2022-07-01", "%Y-%m-%d")))
+        hist = history.connect(settings.history_path)
+        print("Loading market data and building signals…")
+        result = lsmodel.walk_forward(lsmodel.load(hist, since=1_514_764_800), start,
+                                      progress=lambda q, t: print(f"  trained up to day {q} of {t}", flush=True))
+        result["created_at"] = int(time.time())
+        path = settings.history_path.with_name("ls_backtest.json")
+        path.write_text(json.dumps(result))
+        print(f"{time.strftime('%Y-%m-%d', time.gmtime(result['from']))} .. "
+              f"{time.strftime('%Y-%m-%d', time.gmtime(result['to']))}: {result['cagr']:+.1%} a year, worst drop "
+              f"{result['max_drawdown']:+.1%}, Sharpe {result['sharpe']:.2f} (BTC {result['btc_cagr']:+.1%} a year, "
+              f"worst {result['btc_max_drawdown']:+.1%}); trades {result['turnover_per_day']:.0%} of the account a day")
+        print("By year:", {y: f"{v:+.1%}" for y, v in result["by_year"].items()})
+        print(f"Saved to {path}")
     else:
         sys.exit(__doc__)
 

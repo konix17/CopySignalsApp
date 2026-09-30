@@ -153,16 +153,16 @@ async def system_status(admin: users.User = Depends(require_admin), c: Ctx = Dep
     one = lambda sql, *a: c.conn.execute(sql, a).fetchone()[0]  # noqa: E731
     return {
         "sources": [dict(r) for r in c.conn.execute("SELECT * FROM source_status ORDER BY source")],
-        "refreshing": c.pipeline.running, "live_at": c.pipeline.live_at, "stream": c.pipeline.stream.status(),
+        "stream": c.pipeline.stream.status(), "longshort": {"state": c.pipeline.ls_state, "error": c.pipeline.ls_error,
+                                                           "model": c.pipeline.model_info()},
         "db_bytes": size,
         "counts": {
             "users": one("SELECT COUNT(*) FROM users"),
             "active_sessions": one("SELECT COUNT(*) FROM sessions"),
-            "followed_traders": one("SELECT COUNT(DISTINCT source || address) FROM trader_stats WHERE followed = 1"),
-            "open_demo_trades": one("SELECT COUNT(*) FROM my_positions WHERE source = 'demo' AND status = 'open'"),
-            "open_real_positions": one("SELECT COUNT(*) FROM my_positions WHERE source != 'demo' AND status = 'open'"),
-            "tracked_copies_open": one("SELECT COUNT(*) FROM pick_trades WHERE status = 'open' AND style = 'copy'"),
-            "tracked_copies_closed": one("SELECT COUNT(*) FROM pick_trades WHERE status = 'closed' AND style = 'copy'"),
+            "okx_connected": one("SELECT COUNT(*) FROM user_secrets WHERE name = 'okx_api_key'"),
+            "trend_bots": one("SELECT COUNT(*) FROM bot_accounts"),
+            "longshort_positions": one("SELECT COUNT(*) FROM ls_positions"),
+            "longshort_days": one("SELECT COUNT(*) FROM ls_days"),
         },
         "security": {
             "alerts_24h": one("SELECT COUNT(*) FROM audit_log WHERE level = 'alert' AND ts >= ?", now - 86400),

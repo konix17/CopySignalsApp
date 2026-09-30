@@ -23,7 +23,7 @@ import httpx
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
-from app.sources.hyperliquid import normalize_coin  # noqa: E402
+from app.symbols import normalize_coin  # noqa: E402
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--cost", type=float, default=0.005)
