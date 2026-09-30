@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#f4f5f8" media="(prefers-color-scheme: light)" />
+  <meta name="theme-color" content="#090b10" media="(prefers-color-scheme: dark)" />
+  <title>Copy Signals</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- Icons and gradients, referenced with <use href="#i-…">. Zero-sized (not display:none) so gradients still render. -->
+  <svg class="sprite" aria-hidden="true" focusable="false">
+    <defs>
+      <linearGradient id="logo-grad" x1="0" y1="0" x2="1" y2="1"><stop offset="0" class="logo-grad-a" /><stop offset="1" class="logo-grad-b" /></linearGradient>
+      <linearGradient id="area-grad" x1="0" y1="0" x2="0" y2="1"><stop offset="0" class="area-grad-a" /><stop offset="1" class="area-grad-b" /></linearGradient>
+    </defs>
+    <symbol id="i-bot" viewBox="0 0 24 24"><rect x="5" y="7" width="14" height="12" rx="3" /><path d="M12 3v4M9 12h.01M15 12h.01M9.5 15.5h5M2.5 12v3M21.5 12v3" /></symbol>
+    <symbol id="i-picks" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><circle cx="12" cy="12" r="5" /><circle cx="12" cy="12" r="1" /></symbol>
+    <symbol id="i-rising" viewBox="0 0 24 24"><path d="M3 17l6-6 4 4 8-8" /><path d="M15 7h6v6" /></symbol>
+    <symbol id="i-portfolio" viewBox="0 0 24 24"><path d="M12 3v9h9" /><circle cx="12" cy="12" r="9" /></symbol>
+    <symbol id="i-record" viewBox="0 0 24 24"><path d="M4 20V11M10 20V5M16 20v-6M3 20h18" /></symbol>
+    <symbol id="i-how" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M9.6 9.2a2.5 2.5 0 1 1 3.4 2.3c-.6.3-1 .9-1 1.6v.4M12 17h.01" /></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1" /><circle cx="15" cy="7" r="2" /><circle cx="9" cy="12" r="2" /><circle cx="17" cy="17" r="2" /></symbol>
+    <symbol id="i-admin" viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z" /><path d="M9 12l2 2 4-4" /></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.2" /><circle cx="12" cy="12" r="1.2" /><circle cx="19" cy="12" r="1.2" /></symbol>
+    <symbol id="i-logout" viewBox="0 0 24 24"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 16l-4-4 4-4M6 12h10" /></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 0-14.9-3M4 5v3h3M4 13a8 8 0 0 0 14.9 3M20 19v-3h-3" /></symbol>
+    <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 16V11a6 6 0 1 1 12 0v5l2 2H4zM10 21h4" /></symbol>
+  </svg>
+  <a href="#content" class="skip-link" id="skip-link">Skip to content</a>
+
+  <div class="shell">
+    <aside class="sidebar" aria-label="Sidebar">
+      <div class="logo">
+        <svg class="logo-mark" viewBox="0 0 32 32" aria-hidden="true"><rect class="bg" width="32" height="32" rx="9" /><path class="ln" d="M7 21l6-6 4 4 8-9" /></svg>
+        <h1 class="brand">Copy Signals<small>Crypto signals &amp; auto-trading</small></h1>
+      </div>
+      <nav class="side-nav" id="menu" aria-label="Main">
+        <a href="#bot" data-page="bot"><svg class="icon" aria-hidden="true"><use href="#i-bot" /></svg>Auto-trader</a>
+        <a href="#picks" data-page="picks"><svg class="icon" aria-hidden="true"><use href="#i-picks" /></svg>Picks</a>
+        <a href="#rising" data-page="rising"><svg class="icon" aria-hidden="true"><use href="#i-rising" /></svg>Rising now <span id="rising-count" class="count" hidden></span></a>
+        <a href="#portfolio" data-page="portfolio"><svg class="icon" aria-hidden="true"><use href="#i-portfolio" /></svg><span class="portfolio-label">Portfolio</span></a>
+        <a href="#record" data-page="record"><svg class="icon" aria-hidden="true"><use href="#i-record" /></svg>Track record</a>
+        <div class="nav-label">Help</div>
+        <a href="#how" data-page="how"><svg class="icon" aria-hidden="true"><use href="#i-how" /></svg>How it works</a>
+      </nav>
+      <div class="side-foot">
+        <p class="side-note">Research tool, not financial advice. Automatic trading uses demo money only.</p>
+      </div>
+    </aside>
+
+    <div class="main-col">
+      <div class="chrome">
+      <header class="topbar">
+        <div class="mobile-brand">
+          <svg class="logo-mark" viewBox="0 0 32 32" aria-hidden="true"><rect class="bg" width="32" height="32" rx="9" /><path class="ln" d="M7 21l6-6 4 4 8-9" /></svg>
+        </div>
+        <div class="status"><span id="status-dot" class="dot idle" aria-hidden="true"></span><span id="status-text" class="muted">Loading…</span>
+          <span id="status-live" class="sr-only" aria-live="polite"></span></div>
+        <span id="demo-badge" class="demo-badge" hidden>DEMO</span>
+        <div class="spacer"></div>
+        <label class="switch" title="Demo on: see and trade your demo account. Demo off: your real OKX account.">
+          <input type="checkbox" id="demo-toggle" /><span class="slider"></span><span class="switch-label">Demo</span>
+        </label>
+        <button id="notify" class="btn ghost small" hidden><svg class="icon" aria-hidden="true"><use href="#i-bell" /></svg>Alerts</button>
+        <!-- Account menu: who's signed in, pages that aren't in the phone tab bar, and logging out. -->
+        <div class="account" id="account">
+          <button type="button" id="account-button" class="account-button" aria-expanded="false" aria-controls="account-menu">
+            <span class="avatar" id="avatar" aria-hidden="true"></span><span class="sr-only">Account menu for </span><span id="user-name"></span><span class="caret" aria-hidden="true">▾</span>
+          </button>
+          <div id="account-menu" class="account-menu" hidden>
+            <div class="account-who" id="account-who"></div>
+            <a href="#record" data-page="record" class="desk-hide"><svg class="icon" aria-hidden="true"><use href="#i-record" /></svg>Track record</a>
+            <a href="#how" data-page="how" class="desk-hide"><svg class="icon" aria-hidden="true"><use href="#i-how" /></svg>How it works</a>
+            <a href="#settings" data-page="settings"><svg class="icon" aria-hidden="true"><use href="#i-settings" /></svg>Settings</a>
+            <a href="#admin" data-page="admin" class="admin-only" hidden><svg class="icon" aria-hidden="true"><use href="#i-admin" /></svg>Admin</a>
+            <hr />
+            <button type="button" id="logout"><svg class="icon" aria-hidden="true"><use href="#i-logout" /></svg>Log out</button>
+          </div>
+        </div>
+      </header>
+      </div>
+
+  <main id="content" tabindex="-1">
+    <div id="load-error" class="alert warning" role="alert" hidden><span></span></div>
+    <div id="alerts" aria-live="polite"></div>
+
+    <section class="page" data-page="bot" hidden>
+      <div class="page-head"><div><h2>Auto-trader</h2>
+        <p>A trend-following bot for BTC and ETH, tested on every day since 2018. It checks once a day and trades your demo money.</p></div></div>
+      <div id="bot"></div>
+    </section>
+
+    <section class="page" data-page="picks" hidden>
+      <div class="page-head"><div><h2>Picks</h2>
+        <p>Coins that several consistently profitable traders are buying, in an uptrend and not overcrowded. Each comes
+          with an amount, a stop-loss, a target and a hold time.</p></div>
+        <span id="regime" class="regime"></span></div>
+      <div id="picks" class="picks"></div>
+      <div id="copies-section" hidden>
+        <div class="section-title"><h3>Swing copies</h3><span class="pill">new · being tested</span></div>
+        <p class="note">A proven trader’s long that they’ve held for at least 12 hours. Copying those, and selling when the
+          trader sells, made +1.33% a trade after fees in a test on 6,500 trades by 260 traders, beating holding BTC;
+          copying their quick trades lost money, and copying faster didn’t help. A mostly rising market isn’t proof, so
+          these are tracked and demo-traded first.</p>
+        <div id="copies" class="picks"></div>
+      </div>
+      <div id="exiting-section" class="card" hidden>
+        <p class="card-title">Top traders are selling</p>
+        <p class="muted small">More of the followed traders sold these in the last 24 hours than bought. Don’t buy them now.</p>
+        <div id="exiting" class="exiting"></div>
+      </div>
+    </section>
+
+    <section class="page" data-page="rising" hidden>
+      <div class="page-head"><div><h2>Rising now</h2>
+        <p>Smaller coins that just started rising on unusually high volume, scanned every 15 seconds and checked for
+          pump-and-dump behaviour.</p></div>
+        <span id="scan-status" class="pill"></span></div>
+      <div class="alert warning"><span><b>Treat these as information, not buy signals.</b> Tested on 6 months of 5-minute
+        prices (3,683 trades, 237 coins, dead coins included), these rules lost 0.64% per trade after fees, no better than
+        buying at random, and 50 other pump, breakout and dump strategies didn’t work either. They’re followed as paper
+        trades; automatic demo trading doesn’t buy them unless you tick them.</span></div>
+      <div id="budget"></div>
+      <div id="rising" class="picks"></div>
+      <div id="avoid-box" class="card" hidden>
+        <p class="card-title">Pumps to avoid</p>
+        <p class="muted small">These pumped hard and are now topping out or dumping. Don’t buy them. If you hold one, sell.</p>
+        <div id="avoid" class="avoid"></div>
+      </div>
+      <div id="rising-earlier-box" class="card" hidden>
+        <p class="card-title">Flagged in the last 24 hours</p>
+        <p class="muted small">How each coin moved after it was flagged. “Best since flag” is the highest price it reached.</p>
+        <div id="rising-earlier"></div>
+      </div>
+    </section>
+
+    <section class="page" data-page="portfolio" hidden>
+      <div id="real-view">
+        <div class="page-head"><div><h2>Portfolio</h2>
+          <p>Your real OKX account. The app reads it with your read-only key and tells you when to sell; it never
+            trades your money.</p></div>
+          <button id="sync" class="btn small ghost" hidden>Sync with OKX</button></div>
+        <div id="portfolio"></div>
+        <div id="real-types"></div>
+        <div id="connect"></div>
+        <details id="trades-box" class="card" hidden>
+          <summary>Recent OKX trades</summary>
+          <div id="trades"></div>
+        </details>
+      </div>
+      <div id="demo-view" hidden>
+        <div class="page-head"><div><h2>Demo portfolio</h2>
+          <p>Pretend money at real OKX prices. Each demo trade follows its pick’s plan by itself: stop-loss, target, sell
+            signals or hold time. Switch Demo off in the top bar to see your real account.</p></div></div>
+        <div id="demo"></div>
+        <div id="autotrade"></div>
+        <div id="demo-progress"></div>
+      </div>
+    </section>
+
+    <section class="page" data-page="record" hidden>
+      <div class="page-head"><div><h2>Track record</h2>
+        <p>Every pick and rising-now flag is followed as one paper trade, from the OKX price when it appears until its
+          stop, target, sell signal or hold time. Results are after fees, compared with holding BTC over the same days.</p></div></div>
+      <div id="performance"></div>
+    </section>
+
+    <section class="page" data-page="settings" hidden>
+      <div class="page-head"><div><h2>Settings</h2><p>Your login, OKX connection, fees, bankroll and phone alerts.</p></div></div>
+      <div id="settings"></div>
+    </section>
+
+    <section class="page" data-page="admin" hidden>
+      <div class="page-head"><div><h2>Admin</h2><p>Users, sessions, the audit log, data sources and research tools.</p></div></div>
+      <div class="subtabs" id="admin-tabs" role="group" aria-label="Admin sections">
+        <button type="button" data-tab="overview" class="on" aria-pressed="true">Overview</button>
+        <button type="button" data-tab="users" aria-pressed="false">Users</button>
+        <button type="button" data-tab="sessions" aria-pressed="false">Sessions</button>
+        <button type="button" data-tab="audit" aria-pressed="false">Audit log</button>
+        <button type="button" data-tab="appsettings" aria-pressed="false">App settings</button>
+        <button type="button" data-tab="lab" aria-pressed="false">Strategy lab</button>
+      </div>
+      <div id="admin"></div>
+    </section>
+
+    <section class="page" data-page="how" hidden>
+      <div class="page-head"><div><h2>How it works</h2>
+        <p>What each part does, the logic behind it, and what the tests on past data say about it.</p></div></div>
+      <div class="how-grid">
+        <article class="card how">
+          <p class="card-title"><svg class="icon" aria-hidden="true"><use href="#i-bot" /></svg>Auto-trader</p>
+          <p>BTC and ETH each get half the account. Each half is split in three: one third is invested while the price is
+            above its 50-day average, one for the 100-day and one for the 150-day; below an average, that third sits in cash
+            (USDT). When a coin’s futures funding rate turns negative (traders are paying to bet against it), the bot keeps
+            at least a third of that coin anyway: crowded bets against a coin tend to get squeezed.</p>
+          <p>It checks once a day at 00:05 UTC with your OKX fee on every trade. Tested on every day since 2018: +55% a year
+            vs +35% for holding BTC, with about half the worst drop. Checking every hour instead made less (+39%) because of
+            fees.</p>
+        </article>
+        <article class="card how">
+          <p class="card-title"><svg class="icon" aria-hidden="true"><use href="#i-picks" /></svg>Picks</p>
+          <p><b>1. Smart traders are buying</b> (required): at least 3 consistently profitable Hyperliquid or GMX traders hold
+            it long, most of them agree, they aren’t selling, and the price isn’t far past their entry.
+            <b>2. Uptrend:</b> above its 50-day average and up over 30 days. <b>3. Not overcrowded:</b> Binance’s top futures
+            traders aren’t all long and funding isn’t high.</p>
+          <p>3 of 3 = Strong, 2 of 3 = Good. The followed traders’ positions are re-read every minute, so a new buy shows up
+            within about a minute. Only coins you can buy on OKX spot with enough volume are shown.</p>
+        </article>
+        <article class="card how">
+          <p class="card-title"><svg class="icon" aria-hidden="true"><use href="#i-rising" /></svg>Rising now</p>
+          <p>Every 15 seconds: smaller coins up 2% in 15 minutes and 3% in the hour, on 3× their normal volume, still near the
+            high and not already up 40% on the day. 5-minute candles tell a starting pump from one that’s topping or dumping.</p>
+          <p>Tested on 6 months and 237 coins, including ones that later died, these signals didn’t beat buying at random
+            once fees are paid, and neither did 50 other pump, breakout and dump rules. So they’re shown and paper-tracked,
+            but not auto-traded by default.</p>
+        </article>
+        <article class="card how">
+          <p class="card-title"><svg class="icon" aria-hidden="true"><use href="#i-portfolio" /></svg>Selling and sizing</p>
+          <p>A pick’s stop-loss depends on how much the coin normally moves (3–20%), the target is twice as far, and the
+            amount is set so hitting the stop costs about 1.25% of your money (0.75% for Good picks), never more than 10% in
+            one coin or 40% in total.</p>
+          <p>A trade is sold at the stop, the target, when most of the traders leave or sell after you bought, when the
+            uptrend breaks, or when the hold time is over. Open trades are re-priced every 2 seconds.</p>
+        </article>
+        <article class="card how">
+          <p class="card-title"><svg class="icon" aria-hidden="true"><use href="#i-record" /></svg>Demo and real money</p>
+          <p><b>Demo</b> (switch in the top bar): pretend money at real prices. Demo buys and automatic demo trading follow
+            each pick’s plan by themselves. The auto-trader has its own demo account.</p>
+          <p><b>Real</b>: your OKX account, read with a read-only key. The app gives advice and alerts; you place orders on
+            OKX yourself. Nothing trades real money.</p>
+        </article>
+        <article class="card how">
+          <p class="card-title"><svg class="icon" aria-hidden="true"><use href="#i-how" /></svg>Data</p>
+          <p>Hyperliquid and GMX (public trader positions), OKX (prices, live price stream, your account), Binance and OKX
+            futures statistics (crowding, funding). Leaderboards and crowding refresh every 10 minutes; positions, prices,
+            picks and accounts every minute.</p>
+          <p>Everything is on OKX’s spot market, which is licensed in the EU. The app only reacts to public data and never
+            joins pump groups.</p>
+        </article>
+      </div>
+    </section>
+
+    <p class="disclaimer">
+      Copy Signals shows what currently profitable traders hold and which coins are moving. Past profit does not
+      predict future profit. This is a research tool, not financial advice. Only trade money you can afford to lose.
+    </p>
+  </main>
+    </div>
+  </div>
+
+  <nav class="tabbar" id="tabbar" aria-label="Main">
+    <a href="#bot" data-page="bot"><svg class="icon" aria-hidden="true"><use href="#i-bot" /></svg>Bot</a>
+    <a href="#picks" data-page="picks"><svg class="icon" aria-hidden="true"><use href="#i-picks" /></svg>Picks</a>
+    <a href="#rising" data-page="rising"><svg class="icon" aria-hidden="true"><use href="#i-rising" /></svg>Rising<span class="count rising-count-m" hidden></span></a>
+    <a href="#portfolio" data-page="portfolio"><svg class="icon" aria-hidden="true"><use href="#i-portfolio" /></svg>Portfolio</a>
+    <button type="button" id="tab-more" aria-controls="account-menu"><svg class="icon" aria-hidden="true"><use href="#i-more" /></svg>More</button>
+  </nav>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <script src="common.js"></script>
+  <script src="app.js"></script>
+  <script src="settings.js"></script>
+  <script src="admin.js"></script>
+  <script src="bot.js"></script>
+</body>
+</html>

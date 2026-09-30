@@ -1,0 +1,8 @@
+# Direct dependencies. requirements.txt is generated from this file with exact versions and checksums:
+#   .venv/bin/pip-compile --generate-hashes --strip-extras requirements.in
+fastapi
+uvicorn[standard]
+httpx
+argon2-cffi
+cryptography
+websockets

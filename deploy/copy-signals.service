@@ -1,0 +1,25 @@
+# systemd service for Copy Signals. deploy/setup.sh fills in @APP_DIR@ and @APP_USER@ and installs it as
+# /etc/systemd/system/copy-signals.service. It starts the app at boot and restarts it within seconds if it stops.
+# The app only listens on 127.0.0.1: reach it through Tailscale (README → Hosting), never an open port.
+
+[Unit]
+Description=Copy Signals (signals and demo auto-trader)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=@APP_USER@
+WorkingDirectory=@APP_DIR@
+ExecStart=@APP_DIR@/.venv/bin/uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips 127.0.0.1
+Restart=always
+RestartSec=5
+
+# Hardening: the app can only write to its data folder.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@APP_DIR@/data
+
+[Install]
+WantedBy=multi-user.target
