@@ -1,15 +1,17 @@
-"""Track record: every pick is one paper trade.
+"""Track record: every swing copy is one paper trade.
 
-A trade opens the first time a coin appears in the picks (at the exchange
+A trade opens the first time a coin becomes a swing copy (at the exchange
 price then) and closes at the first of:
-- stop-loss hit: exits at the stop, or lower if the price gapped through it
-- target hit: exits at the target (a resting take-profit order fills there)
-- a SELL signal: top traders left or flipped, heavy selling since the trade opened, uptrend broken
-- the planned hold time running out
+- safety stop hit: exits at the stop, or lower if the price gapped through it
+- the copied trader closing or halving the position
+- the 30-day hold time running out
 
 The result is net of the round-trip costs estimated at entry (fees, spread,
 slippage) and compared with simply holding BTC over the same period. Prices
-are checked every refresh, so an exit is detected up to one refresh late.
+are checked every few seconds, and the trader's position every minute.
+
+Paper trades of the strategies that were dropped (style other than 'copy') stay in the table but are no longer
+updated or shown.
 """
 
 import json
@@ -19,43 +21,37 @@ from dataclasses import asdict
 
 from . import portfolio
 from .market import Market
-from .models import Pick, Signal
+from .models import Pick
+
 
 def open_trades(conn: sqlite3.Connection, picks: list[Pick], markets: dict[str, Market], now: int) -> int:
-    held = {r[0] for r in conn.execute("SELECT market_key FROM pick_trades WHERE status = 'open'")}
+    held = {r[0] for r in conn.execute("SELECT market_key FROM pick_trades WHERE status = 'open' AND style = 'copy'")}
     btc = markets.get("BTC")
     rows = [
         (p.market_key, p.symbol, p.strength, now, p.price, p.stop_price, p.target_price, now + int(p.hold_days * 86400),
          p.cost_pct, p.n_traders, btc.price if btc else None, json.dumps([asdict(c) for c in p.checks]), p.price,
-         portfolio.STYLE_OF.get(p.strength, "pick"), p.trail_pct, p.price if p.trail_pct else None,
-         json.dumps(p.features))
+         portfolio.STYLE_OF.get(p.strength, "pick"), json.dumps(p.features))
         for p in picks if p.market_key not in held
     ]
     with conn:
         conn.executemany(
             "INSERT INTO pick_trades (market_key, symbol, strength, opened_at, entry_price, stop_price, target_price, "
-            "hold_until, cost_pct, traders_at_entry, btc_entry, checks, last_price, style, trail_pct, peak_price, features) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "hold_until, cost_pct, traders_at_entry, btc_entry, checks, last_price, style, features) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
     return len(rows)
 
 
-def update_trades(
-    conn: sqlite3.Connection,
-    signals: dict[str, Signal],
-    markets: dict[str, Market],
-    now: int,
-) -> int:
+def update_trades(conn: sqlite3.Connection, markets: dict[str, Market], now: int) -> int:
     closed = 0
     btc = markets.get("BTC")
-    for row in conn.execute("SELECT * FROM pick_trades WHERE status = 'open'").fetchall():
+    for row in conn.execute("SELECT * FROM pick_trades WHERE status = 'open' AND style = 'copy'").fetchall():
         m = markets.get(row["symbol"])
         if not m:
             continue
         t = portfolio.with_peak(row, m.price)
-        findings = portfolio.evaluate(t, m.price, signals.get(t["market_key"]), portfolio.flow_since_entry(conn, t, now),
-                                      m, now, copy_holding=portfolio.copy_holding(conn, t))
+        findings = portfolio.evaluate(t, m.price, now, copy_holding=portfolio.copy_holding(conn, t))
         decision = portfolio.exit_decision(t, m.price, findings, now)
         with conn:
             if decision is None:
@@ -87,9 +83,11 @@ def _summary(rows) -> dict:
 
 
 def performance(conn: sqlite3.Connection, markets: dict[str, Market]) -> dict:
-    closed = conn.execute("SELECT * FROM pick_trades WHERE status = 'closed' ORDER BY closed_at DESC").fetchall()
-    open_ = conn.execute("SELECT * FROM pick_trades WHERE status = 'open' ORDER BY opened_at DESC").fetchall()
-    first = conn.execute("SELECT MIN(opened_at) FROM pick_trades").fetchone()[0]
+    closed = conn.execute("SELECT * FROM pick_trades WHERE status = 'closed' AND style = 'copy' "
+                          "ORDER BY closed_at DESC").fetchall()
+    open_ = conn.execute("SELECT * FROM pick_trades WHERE status = 'open' AND style = 'copy' "
+                         "ORDER BY opened_at DESC").fetchall()
+    first = conn.execute("SELECT MIN(opened_at) FROM pick_trades WHERE style = 'copy'").fetchone()[0]
 
     def unrealized(t):
         m = markets.get(t["symbol"])
@@ -99,7 +97,6 @@ def performance(conn: sqlite3.Connection, markets: dict[str, Market]) -> dict:
     return {
         "since": first,
         "overall": _summary(closed),
-        "by_strength": {s: _summary([r for r in closed if r["strength"] == s]) for s in ("Copy", "Strong", "Good", "Early", "Pump")},
         "open": [{"symbol": t["symbol"], "strength": t["strength"], "opened_at": t["opened_at"],
                   "entry_price": t["entry_price"], "net_now": unrealized(t)} for t in open_],
         "recent": [{"symbol": r["symbol"], "strength": r["strength"], "opened_at": r["opened_at"],

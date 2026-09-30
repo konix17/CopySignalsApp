@@ -10,17 +10,16 @@ Research (research/copy_backtest.py: 6,500 long trades by 260 random Hyperliquid
 It's a mostly rising market, so copies are followed as paper trades and demo-traded, not trusted blindly.
 
 Rules: a long held by a followed trader for at least MIN_AGE_H, not cut to half its peak size, in a coin that's
-liquid on OKX spot (same volume and spread limits as picks). One copy per coin, following the best-scored trader
+liquid on OKX spot (MIN_VOLUME_USD and MAX_SPREAD). One copy per coin, following the best-scored trader
 holding it. Sell when that trader closes or halves the position; a SAFETY_STOP guards against disasters (the rule
-was tested without a stop, so it's set wide).
+was tested without a stop, so it's set wide). When BTC is below its 50-day average, copies are half size.
 """
 
 import json
 import sqlite3
 
-from .market import Market
+from .market import Market, round_trip_cost
 from .models import Check, Pick
-from .picks import round_trip_cost
 
 MIN_AGE_H = 12
 SAFETY_STOP = 0.25
@@ -28,6 +27,22 @@ MAX_HOLD_DAYS = 30
 SIZE_PCT = 0.05  # of the bankroll per copy
 MAX_COPIES = 5
 NO_TARGET = 1.0  # +100%: copies have no target; they sell when the trader does
+
+
+def market_regime(markets: dict[str, Market]) -> dict:
+    """Uptrend while BTC is above its 50-day average; in a downtrend copies are half size."""
+    btc = markets.get("BTC")
+    if not btc or btc.ma50 is None:
+        return {"risk_on": True, "text": "Market trend unknown (no BTC history yet)"}
+    up = btc.price > btc.ma50
+    gap = btc.price / btc.ma50 - 1
+    return {
+        "risk_on": up,
+        "btc_price": btc.price,
+        "btc_ma50": btc.ma50,
+        "text": (f"Market uptrend: BTC is {gap * 100:+.1f}% vs its 50-day average" if up else
+                 f"Market downtrend: BTC is {gap * 100:+.1f}% vs its 50-day average, so copies are half size"),
+    }
 
 
 def candidates(conn: sqlite3.Connection, markets: dict[str, Market], scores: dict[tuple[str, str], float], now: int,

@@ -29,7 +29,7 @@ const ADMIN_TABS = {
         ${tile("Failed logins (24h)", sec.failed_logins_24h)}${tile("Locked accounts", sec.locked_accounts)}
         ${tile("Security warnings (24h)", sec.warnings_24h)}${tile("Database size", `${fixed(s.db_bytes / 1e6, 1)} MB`)}
         ${tile("Followed traders", s.counts.followed_traders)}${tile("Open demo trades", s.counts.open_demo_trades)}
-        ${tile("Tracked picks open / closed", `${s.counts.tracked_picks_open} / ${s.counts.tracked_picks_closed}`)}
+        ${tile("Tracked copies open / closed", `${s.counts.tracked_copies_open} / ${s.counts.tracked_copies_closed}`)}
       </div>
       <h3>Data sources</h3>
       <div class="table-wrap"><table>
@@ -39,8 +39,7 @@ const ADMIN_TABS = {
           <td>${r.last_error ? `<span class="down">${esc(r.last_error)}</span>` : `<span class="up">OK</span>`}</td></tr>`).join("")}</tbody>
       </table></div>
       <p class="note">Full refresh: ${s.refreshing ? "running now" : "idle"} · live prices: ${s.live_at ? esc(ago(s.live_at)) : "–"}
-        (${s.stream.connected ? `streaming ${s.stream.fresh} of ${s.stream.pairs} coins from OKX` : "price stream down, polling every 10 s"})
-        · rising-now scan: ${s.scan_at ? esc(ago(s.scan_at)) : "–"}</p>`;
+        (${s.stream.connected ? `streaming ${s.stream.fresh} of ${s.stream.pairs} coins from OKX` : "price stream down, polling every 10 s"})</p>`;
   },
 
   async users() {
@@ -175,44 +174,6 @@ const ADMIN_TABS = {
       } catch (err) { formMessage($("app-settings-msg"), err.message); }
     });
   },
-};
-
-// Strategy lab: the paper trades replayed under other exit rules (backend/app/replay.py).
-const LAB_STYLES = { all: "All", pick: "Picks", early: "Early", pump: "Pump" };
-
-function labTable(rule) {
-  const rows = [["all", rule.all], ...Object.entries(rule.by_style)].filter(([, s]) => s.trades || s.open);
-  const signed = (v) => `<span class="${v > 0 ? "up" : v < 0 ? "down" : ""}">${pct(v, 2)}</span>`;
-  return `<div class="table-wrap"><table>
-    <thead><tr><th>Type</th><th class="num">Closed</th><th class="num">Won</th><th class="num">Avg result</th>
-      <th class="num">Total</th><th class="num">Avg hours</th><th class="num">Still open</th><th class="num">Open, marked now</th></tr></thead>
-    <tbody>${rows.map(([k, s]) => `<tr><td>${esc(LAB_STYLES[k] || k)}</td><td class="num">${s.trades}</td>
-      <td class="num">${s.win_rate == null ? "–" : pct(s.win_rate, 0).replace("+", "")}</td>
-      <td class="num">${s.avg_net == null ? "–" : signed(s.avg_net)}</td><td class="num">${signed(s.total_net)}</td>
-      <td class="num">${s.avg_hours == null ? "–" : fixed(s.avg_hours, 1)}</td><td class="num">${s.open}</td>
-      <td class="num">${s.open ? signed(s.open_net) : "–"}</td></tr>`).join("")}</tbody></table></div>
-    <p class="note">Exits: ${Object.entries(rule.all.by_reason).map(([r, v]) => `${esc(r)} ${v.trades} (${pct(v.avg_net, 2)})`).join(" · ") || "none yet"}</p>`;
-}
-
-ADMIN_TABS.lab = async () => {
-  const data = await api("/api/admin/lab");
-  const r = data.result;
-  $("admin").innerHTML = `
-    <div class="card">
-      <p>Every paper trade is replayed on 5-minute OKX prices under each exit rule, with the same costs. A coin is held once at a time, so a
-        rule that keeps a trade open also skips the re-buys made meanwhile. Totals add up equal-sized trades (share of one trade).
-        Use this to compare rules before changing the live ones. It isn't proof: small samples and one market period can mislead.</p>
-      <div class="actions"><button type="button" class="btn small" id="lab-run" ${data.running ? "disabled" : ""}>${data.running ? "Running…" : "Run the replay"}</button>
-        <span class="muted small">${r ? `Last run ${esc(ago(r.now))} · takes about a minute` : "Not run yet · takes about a minute"}</span></div>
-    </div>
-    ${r ? Object.entries(r.rules).map(([k, rule]) => `<h3>${esc(rule.label)}</h3>${labTable(rule)}`).join("") : ""}
-    ${r && r.missing.length ? `<p class="note">No OKX price history for: ${esc(r.missing.join(", "))}</p>` : ""}`;
-  $("lab-run").addEventListener("click", async (e) => {
-    try {
-      await withBusy(e.target, "Running…", () => post("/api/admin/lab"));
-    } catch (err) { return notice(err.message, "error"); }
-    ADMIN_TABS.lab();
-  });
 };
 
 // Reset password: a masked field typed twice, instead of a browser prompt that shows the password.

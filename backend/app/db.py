@@ -2,7 +2,7 @@ import sqlite3
 from dataclasses import asdict, fields
 from pathlib import Path
 
-from .models import Position, Positioning, TraderStat
+from .models import Position, TraderStat
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS trader_stats (
@@ -32,20 +32,11 @@ CREATE TABLE IF NOT EXISTS trader_fetch (
     source TEXT NOT NULL, address TEXT NOT NULL, last_fetched INTEGER NOT NULL, PRIMARY KEY (source, address)
 );
 
-CREATE TABLE IF NOT EXISTS positioning (
-    exchange TEXT NOT NULL, symbol TEXT NOT NULL, long_share REAL NOT NULL, long_share_24h REAL, funding REAL,
-    updated_at INTEGER NOT NULL, PRIMARY KEY (exchange, symbol)
-);
 -- OKX spot market data: price, liquidity and trend per coin.
 CREATE TABLE IF NOT EXISTS markets (
     coin TEXT PRIMARY KEY, pair TEXT NOT NULL, price REAL NOT NULL, bid REAL, ask REAL, volume_usd REAL,
     ma20 REAL, ma50 REAL, ret30 REAL, daily_vol REAL, trend_at INTEGER, updated_at INTEGER NOT NULL,
     change_24h REAL
-);
--- "Rising now" scanner: smaller coins flagged for starting to rise on unusual volume.
-CREATE TABLE IF NOT EXISTS movers (
-    coin TEXT PRIMARY KEY, first_flagged_at INTEGER NOT NULL, flag_price REAL NOT NULL, last_flagged_at INTEGER NOT NULL,
-    last_price REAL NOT NULL, peak_price REAL NOT NULL, score REAL NOT NULL, pick_json TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS trader_quality (
     source TEXT NOT NULL, address TEXT NOT NULL, max_drawdown REAL NOT NULL, updated_at INTEGER NOT NULL,
@@ -56,14 +47,15 @@ CREATE TABLE IF NOT EXISTS source_status (
     n_traders INTEGER, n_positions INTEGER, duration_s REAL
 );
 
--- Track record: every pick is one paper trade, from when it first appears until it exits.
+-- Track record: every swing copy is one paper trade, from when it first appears until it exits. Rows with a
+-- style other than 'copy' are from strategies that were dropped; they're kept but no longer updated or shown.
 CREATE TABLE IF NOT EXISTS pick_trades (
     id INTEGER PRIMARY KEY, market_key TEXT NOT NULL, symbol TEXT NOT NULL, direction TEXT NOT NULL DEFAULT 'long',
     strength TEXT NOT NULL, opened_at INTEGER NOT NULL, entry_price REAL NOT NULL, stop_price REAL NOT NULL,
     target_price REAL NOT NULL, hold_until INTEGER NOT NULL, cost_pct REAL NOT NULL, traders_at_entry INTEGER,
     btc_entry REAL, checks TEXT, status TEXT NOT NULL DEFAULT 'open', closed_at INTEGER, exit_price REAL,
     exit_reason TEXT, net_return REAL, btc_return REAL, last_price REAL,
-    style TEXT NOT NULL DEFAULT 'pick',  -- 'pick' (three checks), 'early' (rising now) or 'pump' (pump ride)
+    style TEXT NOT NULL DEFAULT 'pick',  -- 'copy' (swing copy); older rows: 'pick', 'early' or 'pump'
     trail_pct REAL, peak_price REAL,     -- trailing stop: exit when price falls trail_pct below peak_price
     features TEXT                        -- the pick's inputs at entry (JSON), for learning
 );
@@ -85,13 +77,6 @@ CREATE TABLE IF NOT EXISTS my_positions (
     user_id INTEGER, strength TEXT,
     features TEXT  -- the pick's inputs when it was opened (JSON), for learning which inputs predict winners
 );
--- Latest pump analysis per coin (5-minute candles), used for pump rides and sell alerts.
-CREATE TABLE IF NOT EXISTS pumps (
-    coin TEXT PRIMARY KEY, phase TEXT NOT NULL, pump_like INTEGER NOT NULL, rise REAL, from_peak REAL,
-    gain_now REAL, minutes REAL, volume_spike REAL, base_price REAL, peak_price REAL, price REAL,
-    trail_pct REAL, summary TEXT, updated_at INTEGER NOT NULL
-);
-
 -- Each user's OKX account mirror (read-only key). Re-fetchable from OKX at any time.
 CREATE TABLE IF NOT EXISTS user_holdings (
     user_id INTEGER NOT NULL, coin TEXT NOT NULL, exchange TEXT NOT NULL, qty REAL NOT NULL, locked REAL NOT NULL,
@@ -112,7 +97,7 @@ CREATE TABLE IF NOT EXISTS alerts (
     level TEXT NOT NULL, message TEXT NOT NULL, seen INTEGER NOT NULL DEFAULT 0, user_id INTEGER,
     UNIQUE (position_id, kind)
 );
--- App-wide values (scanner state, admin defaults as "setting.<name>").
+-- App-wide values (admin defaults as "setting.<name>").
 CREATE TABLE IF NOT EXISTS prefs (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 -- Accounts and security.
@@ -209,12 +194,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # OKX is the only exchange now: drop Binance-era market data and settings (all re-fetched from OKX).
         conn.execute("DELETE FROM prefs WHERE key IN ('binance_status', 'exchange')")
         if conn.execute("SELECT 1 FROM markets WHERE pair NOT LIKE '%-%' LIMIT 1").fetchone():
-            for table in ("markets", "movers", "pumps"):
-                conn.execute(f"DELETE FROM {table}")
+            conn.execute("DELETE FROM markets")
         # The single-user account mirror became per-user (user_holdings/trades/orders); it's re-fetched from OKX.
         for old in ("account_holdings", "account_trades", "account_orders"):
             conn.execute(f"DROP TABLE IF EXISTS {old}")
         conn.execute("DELETE FROM prefs WHERE key = 'account_status'")
+        # Market data of the strategies that were dropped (rising-now scanner, pump analysis, futures crowding).
+        for old in ("movers", "pumps", "positioning"):
+            conn.execute(f"DROP TABLE IF EXISTS {old}")
+        conn.execute("DELETE FROM prefs WHERE key IN ('scan_at', 'setting.default_risk_budget_pct')")
 
 
 def _add_missing_columns(conn: sqlite3.Connection) -> None:
@@ -270,15 +258,6 @@ def replace_positions(conn: sqlite3.Connection, source: str, positions: list[Pos
         )
 
 
-def load_positions(conn: sqlite3.Connection) -> list[Position]:
-    return [Position(**{c: row[c] for c in _POS_COLS}) for row in conn.execute("SELECT * FROM positions")]
-
-
-def load_followed_scores(conn: sqlite3.Connection, window: str) -> dict[tuple[str, str], float]:
-    rows = conn.execute("SELECT source, address, score FROM trader_stats WHERE window = ? AND followed = 1", (window,))
-    return {(r["source"], r["address"]): r["score"] for r in rows}
-
-
 # How much each window counts toward a trader's overall score.
 COMPOSITE_WEIGHTS = {"day": 0.15, "week": 0.35, "month": 0.35, "allTime": 0.15}
 
@@ -288,23 +267,6 @@ def load_composite_scores(conn: sqlite3.Connection) -> dict[tuple[str, str], flo
     case = " ".join(f"WHEN '{w}' THEN {x}" for w, x in COMPOSITE_WEIGHTS.items())
     rows = conn.execute(f"SELECT source, address, SUM(score * CASE window {case} ELSE 0 END) AS s FROM trader_stats GROUP BY 1, 2")
     return {(r["source"], r["address"]): r["s"] for r in rows if r["s"] > 0}
-
-
-def save_positioning(conn: sqlite3.Connection, rows: list[Positioning], ts: int) -> None:
-    with conn:
-        conn.executemany(
-            "INSERT OR REPLACE INTO positioning VALUES (?, ?, ?, ?, ?, ?)",
-            [(p.exchange, p.symbol, p.long_share, p.long_share_24h, p.funding, ts) for p in rows],
-        )
-
-
-def load_positioning(conn: sqlite3.Connection, max_age_s: int, now: int) -> dict[str, list[Positioning]]:
-    out: dict[str, list[Positioning]] = {}
-    for r in conn.execute("SELECT * FROM positioning WHERE updated_at >= ?", (now - max_age_s,)):
-        out.setdefault(r["symbol"], []).append(
-            Positioning(r["exchange"], r["symbol"], r["long_share"], r["long_share_24h"], r["funding"])
-        )
-    return out
 
 
 def save_markets(conn: sqlite3.Connection, markets: dict, ts: int) -> None:

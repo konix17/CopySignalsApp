@@ -257,7 +257,7 @@ def adopt_orphans(conn: sqlite3.Connection, user_id: int) -> dict:
         conn.execute("UPDATE alerts SET user_id = (SELECT user_id FROM my_positions p WHERE p.id = alerts.position_id) "
                      "WHERE user_id IS NULL")
     carried = {}
-    for key in ("bankroll", "risk_budget"):
+    for key in ("bankroll",):
         row = conn.execute("SELECT value FROM prefs WHERE key = ?", (key,)).fetchone()
         if row:
             set_setting(conn, user_id, key, float(row[0]))

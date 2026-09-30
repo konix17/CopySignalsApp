@@ -1,46 +1,35 @@
-// Main app: picks, rising now, portfolio (real or demo), track record. Helpers are in common.js.
-const state = { status: null, account: null, portfolio: null, demo: null, bankroll: null, rising: null };
+// Main app: swing copies, portfolio (real or demo), track record. Helpers are in common.js.
+const state = { status: null, account: null, portfolio: null, demo: null, bankroll: null };
 const demoMode = () => Boolean(state.status?.demo_mode);
 
-// ---------- Pick cards (Picks and Rising now) ----------
-function pickCard(p, i) {
+// ---------- Swing copy cards ----------
+function copyCard(p, i) {
   const connected = state.status?.account.ok;
-  const early = p.strength === "Early" || p.strength === "Pump";
-  const pump = p.strength === "Pump";
-  const passed = p.checks.filter((c) => c.passed).length;
-  const copy = p.strength === "Copy";
-  const grade = pump ? "Pump starting" : early ? "Early mover" : copy ? "Swing copy" : p.strength;
-  const sub = early ? `Score ${Math.round(p.score)}${p.flag ? ` · flagged ${ago(p.flag.flagged_at)}` : ""}`
-    : copy ? `copying one trader` : `${passed} of 3 checks passed`;
-  // The ✓/✕ symbol and colour are hidden from screen readers, which get the word instead.
-  const mark = (c) => `<span class="mark" aria-hidden="true">${c.passed ? "✓" : early ? "!" : "✕"}</span>`
-    + `<span class="sr-only">${c.passed ? "Passed: " : early ? "Caution: " : "Failed: "}</span>`;
+  // The ✓/! symbol and colour are hidden from screen readers, which get the word instead.
+  const mark = (c) => `<span class="mark" aria-hidden="true">${c.passed ? "✓" : "!"}</span>`
+    + `<span class="sr-only">${c.passed ? "Yes: " : "Note: "}</span>`;
   // In demo mode, amounts are sized to the demo account instead of your real bankroll.
   const shown = demoMode() ? demoAmount(p) : p.size_usd;
   const k = p.size_usd ? shown / p.size_usd : 1;
   return `
-    <article class="pick ${early ? "early" : ""}" data-i="${i}">
+    <article class="pick" data-i="${i}">
       <div class="pick-head">${coinIcon(p.symbol)}
-        <div class="pick-title"><span class="sym">${esc(p.symbol)}</span><span class="muted small">${esc(sub)}</span></div>
-        <span class="grade g-${esc(p.strength)}">${esc(grade)}</span></div>
+        <div class="pick-title"><span class="sym">${esc(p.symbol)}</span><span class="muted small">copying one trader</span></div>
+        <span class="grade g-Copy">Swing copy</span></div>
       <div class="pick-amount">
         <div><small>${demoMode() ? "Demo buy" : "Buy"}</small><b>${money(shown, 0)}</b></div>
-        <div class="right"><small>${copy ? "Hold" : "Hold about"}</small><b>${copy ? "while they do" : days(p.hold_days)}</b></div></div>
+        <div class="right"><small>Hold</small><b>while they do</b></div></div>
       <div class="levels">
         <div><small>Buy around</small><b>${price(p.price)}</b></div>
-        <div><small>${pump ? "Trailing stop" : copy ? "Safety stop" : "Stop-loss"}</small><b class="down">${pump ? `${Math.round(p.trail_pct * 100)}% below top` : price(p.stop_price)}</b>
-          <span class="muted">${pump ? `starts ${price(p.stop_price)}` : pct(p.stop_pct)}</span></div>
-        ${copy ? `<div><small>Sell when</small><b>the trader sells</b><span class="muted">checked every minute</span></div>`
-          : `<div><small>Target</small><b class="up">${price(p.target_price)}</b><span class="muted">${pct(p.target_pct)}</span></div>`}
+        <div><small>Safety stop</small><b class="down">${price(p.stop_price)}</b><span class="muted">${pct(p.stop_pct)}</span></div>
+        <div><small>Sell when</small><b>the trader sells</b><span class="muted">checked every minute</span></div>
       </div>
       <ul class="checks">${p.checks.map((c) => `
-        <li class="${c.passed ? "pass" : early ? "warn" : "fail"}">${mark(c)}
+        <li class="${c.passed ? "pass" : "warn"}">${mark(c)}
           <span><span class="name">${esc(c.name)}</span><span class="detail">${esc(c.detail)}</span></span></li>`).join("")}
       </ul>
-      ${early && p.flag ? `<div class="since">Since flagged at ${price(p.flag.flag_price)}: ${signed(p.flag.since_flag, pct(p.flag.since_flag))}</div>` : ""}
       ${p.notes.length ? `<ul class="pick-notes">${p.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}
-      <div class="net"><span class="muted">After fees</span>${copy ? `<span>worst case ${signed(-1, money(p.net_loss_usd * k))} at the safety stop</span>`
-        : `<span>win ${signed(1, money(p.net_win_usd * k))}</span><span>lose ${signed(-1, money(p.net_loss_usd * k))}</span>`}${early && !demoMode() ? `<span class="muted">high-risk budget</span>` : ""}</div>
+      <div class="net"><span class="muted">After fees</span><span>worst case ${signed(-1, money(p.net_loss_usd * k))} at the safety stop</span></div>
       <div class="actions">
         ${demoMode()
           ? (p.demo_running ? `<span class="held">✓ Demo trade running</span>` : `<button class="btn small" data-act="demo">Demo buy</button>`)
@@ -61,114 +50,32 @@ function bindCards(container, list) {
   }));
 }
 
-function renderPicks(data) {
+function renderCopies(data) {
   const r = data.regime;
   $("regime").className = `regime ${r.risk_on ? "on" : "off"}`;
   $("regime").textContent = r.text;
-  const copies = data.copies || [];
-  $("copies-section").hidden = !copies.length;
-  if (!busyInside($("copies-section"))) {
-    $("copies").innerHTML = copies.map(pickCard).join("");
-    bindCards($("copies"), copies);
-  }
-  if (busyInside($("picks"))) return;
-  if (!data.picks.length) {
-    $("picks").innerHTML = `<div class="empty">No coins pass the checks right now. That’s normal, because the app only shows setups where
-      proven traders, the price trend and positioning line up. New picks can appear any minute.</div>`;
+  if (busyInside($("copies"))) return;
+  if (!data.copies.length) {
+    $("copies").innerHTML = `<div class="empty">No swing copies right now. A copy appears when one of the followed traders
+      has held a long for 12 hours in a coin that trades enough on OKX. The traders are checked every minute.</div>`;
     return;
   }
-  $("picks").innerHTML = data.picks.map(pickCard).join("");
-  bindCards($("picks"), data.picks);
+  $("copies").innerHTML = data.copies.map(copyCard).join("");
+  bindCards($("copies"), data.copies);
 }
 
-// ---------- Rising now ----------
-const MOVER_NOTIFY_SCORE = 70;
-
-const PHASE = { starting: "Pump starting", running: "Pump running", topping: "Topping out", dumping: "Dumping" };
-
-function renderBudget(b) {
-  if (document.activeElement?.id === "budget-input") return;  // don't redraw while typing
-  const pctOf = b.amount ? Math.round((b.risk_budget / b.amount) * 100) : 0;
-  const used = b.risk_budget ? Math.min(1, b.risk_budget_used / b.risk_budget) : 0;
-  $("budget").innerHTML = `
-    <div class="budget">
-      <div class="budget-row">
-        <label><b>High-risk budget</b> $<input type="number" id="budget-input" min="0" step="10" value="${Math.round(b.risk_budget)}" /></label>
-        <span class="muted">${pctOf}% of your ${money(b.amount, 0)} bankroll · each trade uses ${money(b.per_trade, 0)}</span>
-      </div>
-      <div class="meter"><div data-width="${(used * 100).toFixed(1)}"></div></div>
-      <div class="muted small">${money(b.risk_budget_used)} in open risky trades · ${money(b.risk_budget_free)} free</div>
-    </div>`;
-  applyDynamicStyles($("budget"));
-  $("budget-input").addEventListener("change", async (e) => {
-    const v = +e.target.value;
-    if (!(v >= 0)) return notice("Enter a budget of $0 or more.", "error");
-    try {
-      await put("/api/settings/prefs", { risk_budget: v });
-      notice("High-risk budget saved.");
-    } catch (err) { return notice(err.message, "error"); }
-    e.target.blur();
-    loadAll();
-  });
-}
-
-function renderRising(data) {
-  state.rising = data;
-  renderBudget(data.budget);
-  $("avoid-box").hidden = !data.avoid.length;
-  $("avoid").innerHTML = data.avoid.map((a) => `
-    <div class="avoid-item ${esc(a.phase)}"><b>${esc(a.coin)}</b> <span class="phase">${PHASE[a.phase]}</span>
-      <span class="muted">${esc(a.summary)}. Don’t buy; sell if you hold it.</span></div>`).join("");
-  const n = data.rising.length;
-  document.querySelectorAll("#rising-count, .rising-count-m").forEach((el) => { el.hidden = !n; el.textContent = n; });
-  $("scan-status").textContent = data.scanned_at ? `Last scan ${ago(data.scanned_at)} · scans every 15 seconds` : "The first scan runs about 20 seconds after the app starts.";
-  // Don't wipe a half-filled demo form or an open order ticket.
-  if (!$("rising").querySelector(".buy-form, .ticket")) {
-    $("rising").innerHTML = n ? data.rising.map(pickCard).join("")
-      : `<div class="empty">Nothing is breaking out right now. Coins show up here within seconds of starting to rise.</div>`;
-    bindCards($("rising"), data.rising);
-  }
-  const e = data.earlier;
-  $("rising-earlier-box").hidden = !e.length;
-  $("rising-earlier").innerHTML = e.length ? `<div class="table-wrap"><table>
-    <thead><tr><th>Coin</th><th>Flagged</th><th>Now</th><th class="num">Score</th><th class="num">Price then</th><th class="num">Now</th><th class="num">Since flag</th><th class="num">Best since flag</th></tr></thead>
-    <tbody>${e.map((x) => `<tr><td>${esc(x.symbol)}</td><td>${ago(x.flagged_at)}</td><td>${x.pump ? esc(PHASE[x.pump.phase]) : "–"}</td><td class="num">${Math.round(x.score)}</td>
-      <td class="num">${price(x.flag_price)}</td><td class="num">${price(x.last_price)}</td>
-      <td class="num">${signed(x.since_flag, pct(x.since_flag))}</td><td class="num">${signed(x.best_since_flag, pct(x.best_since_flag))}</td></tr>`).join("")}
-    </tbody></table></div>` : "";
-
-  // Desktop notification for strong new flags.
-  const seen = new Set(store.get("movers_seen", []));
-  const fresh = data.rising.filter((p) => !seen.has(`${p.symbol}:${p.flag.flagged_at}`));
-  if ("Notification" in window && Notification.permission === "granted") {
-    fresh.filter((p) => p.strength === "Pump" || p.score >= MOVER_NOTIFY_SCORE).forEach((p) =>
-      new Notification(`${p.strength === "Pump" ? "Pump starting" : "Rising"}: ${p.symbol}`, { body: `${p.checks[0].detail}. ${p.checks[1].detail}.` }));
-  }
-  fresh.forEach((p) => seen.add(`${p.symbol}:${p.flag.flagged_at}`));
-  store.set("movers_seen", [...seen].slice(-300));
-}
-
-async function loadRising() {
-  renderRising(await api("/api/movers"));
-}
-
-// OKX order steps: market buy, then a TP/SL (take-profit + stop-loss) order, or a trailing stop for pump rides.
+// OKX order steps: market buy, then a stop-loss order at the safety stop. There's no take-profit: you sell when the
+// app alerts you that the trader sold.
 function ticketSteps(p) {
   const qty = Math.round(p.size_usd);
-  const trail = p.trail_pct ? Math.round(p.trail_pct * 100) : null;
   return `
     <li>Open <a href="${esc(p.trade_url)}" target="_blank" rel="noopener">${esc(p.symbol)}/USDT on OKX</a> (Spot).</li>
     <li>Buy → <b>Market</b> → amount in USDT <code>${qty}</code> ${copyButton(qty)}</li>
-    ${trail ? `
-    <li>Protect it: Sell → order type <b>Trailing stop</b>, amount = all the ${esc(p.symbol)} you just bought.
-      <div>Callback rate <code>${trail}%</code> ${copyButton(trail)}</div>
-      <div class="muted">Watch for the app’s sell alert too: pumps can collapse faster than a stop fills.</div>
-    </li>` : `
-    <li>Protect it: Sell → order type <b>TP/SL</b>, amount = all the ${esc(p.symbol)} you just bought.
-      <div>TP trigger price <code>${orderPrice(p.target_price)}</code> ${copyButton(orderPrice(p.target_price))}</div>
+    <li>Protect it: Sell → order type <b>TP/SL</b>, amount = all the ${esc(p.symbol)} you just bought. Leave TP empty.
       <div>SL trigger price <code>${orderPrice(p.stop_price)}</code> ${copyButton(orderPrice(p.stop_price))}</div>
-      <div class="muted">Leave both order prices on “Market” so they sell straight away when triggered.</div>
-    </li>`}`;
+      <div class="muted">Leave the order price on “Market” so it sells straight away when triggered.</div>
+    </li>
+    <li>Sell the rest yourself when the app alerts you that the trader sold (it checks every minute).</li>`;
 }
 
 function toggleTicket(card, p) {
@@ -247,9 +154,11 @@ function openDemoForm(card, p) {
 }
 
 // ---------- Shared: account panel + trade rows (used by your portfolio and the demo account) ----------
-const REASON_TEXT = { stop: "stop-loss hit", target: "take-profit reached", time: "hold time over", trend: "uptrend broke",
+// Older closed trades can carry reasons from strategies that were dropped (trend … pump_dump).
+const REASON_TEXT = { stop: "stop-loss hit", target: "take-profit reached", time: "hold time over",
+  trader_closed: "the copied trader sold", sold: "sold", manual: "sold", trend: "uptrend broke",
   exited: "top traders left", flipped: "top traders turned against it", selling: "top traders sold",
-  sold: "sold", manual: "sold", pump_fading: "pump topped out", pump_dump: "pump dumping" };
+  pump_fading: "pump topped out", pump_dump: "pump dumping" };
 const checkLabel = (c) => ({ ok: ["ok", `✓ Matches ${EX()}`], qty_mismatch: ["bad", `Amount differs from ${EX()}`],
   missing: ["bad", `Not found on ${EX()}`] })[c];
 const ADVICE_LABEL = { SELL: "Sell now", TAKE_PROFIT: "Take profit", WATCH: "Check", HOLD: "Hold" };
@@ -271,7 +180,7 @@ function accountPanel({ label, value, headline, a, live, extraTiles = [], footer
         ${extraTiles.join("")}
         ${stat("Invested now", money(a.invested), running ? `${running} position${running === 1 ? "" : "s"} open` : "")}
         ${stat("Open result", running ? signed(a.open_result, money(a.open_result)) : "–", "after fees, live")}
-        ${stat("If all targets hit", running ? signed(a.best_case, money(a.best_case)) : "–")}
+        ${a.best_case == null ? "" : stat("If all targets hit", running ? signed(a.best_case, money(a.best_case)) : "–")}
         ${stat("If all stops hit", running ? signed(a.worst_case, money(a.worst_case)) : "–")}
         ${stat("Finished trades", a.finished ? `${a.successful} of ${a.finished} won` : "–",
                a.finished ? signed(a.realized, money(a.realized) + " total") : "")}
@@ -282,13 +191,17 @@ function accountPanel({ label, value, headline, a, live, extraTiles = [], footer
 
 function rangeBar(t) {
   const stop = t.stop_now ?? t.stop_price;
-  const progress = Math.min(1, Math.max(0, (t.last_price - stop) / (t.target_price - stop)));
-  const label = t.trail_pct ? `Trailing stop ${price(stop)}` : `Stop ${price(stop)}`;
+  const copy = t.style === "copy";
+  // Copies have no target: the bar puts the buy price in the middle, the safety stop on the left.
+  const top = copy ? 2 * t.entry_price - stop : t.target_price;
+  const progress = Math.min(1, Math.max(0, (t.last_price - stop) / (top - stop)));
+  const label = copy ? `Safety stop ${price(stop)}` : t.trail_pct ? `Trailing stop ${price(stop)}` : `Stop ${price(stop)}`;
   return `
-    <div class="range" title="Where the price is between the stop-loss and the take-profit">
+    <div class="range" title="${copy ? "Where the price is compared with the buy price and the safety stop" : "Where the price is between the stop-loss and the take-profit"}">
       <span class="${t.if_stop_usd >= 0 ? "up" : "down"}">${label}<br>${signed(t.if_stop_usd, money(t.if_stop_usd))}</span>
       <div class="bar"><div class="marker" data-left="${(progress * 100).toFixed(1)}"></div></div>
-      <span class="up">Target ${price(t.target_price)}<br>+${money(t.if_target_usd)}</span>
+      ${copy ? `<span class="muted">No target<br>sells with the trader</span>`
+        : `<span class="up">Target ${price(t.target_price)}<br>+${money(t.if_target_usd)}</span>`}
     </div>`;
 }
 
@@ -299,7 +212,7 @@ function openRow(t, { tags = "", actions = "", status = "", extraDetails = "" })
   return `
     <div class="pos ${t.source === "demo" ? "demo" : esc(t.advice)}" data-id="${t.id}">
       <div class="pos-row">
-        ${coinIcon(t.symbol)}<span class="sym">${esc(t.symbol)}</span>${t.style === "pump" ? `<span class="tag pump">pump ride</span>` : t.style === "early" ? `<span class="tag">early</span>` : ""}${tags}
+        ${coinIcon(t.symbol)}<span class="sym">${esc(t.symbol)}</span>${t.style === "copy" ? `<span class="tag">copy</span>` : ""}${tags}
         <span class="pnl">${signed(t.net_now, `${pct(t.net_now, 2)} (${money((t.net_now || 0) * t.size_usd)})`)}</span>
         <span class="grow"></span>
         <span class="muted">day ${day} of ${Math.ceil(planned)}</span>
@@ -333,7 +246,7 @@ function closedRow(t, { actions = "" } = {}) {
 }
 
 // ---------- Demo account ----------
-// Same share of the account as the pick suggests for your real bankroll, capped at the cash left.
+// Same share of the account as the copy suggests for your real bankroll, capped at the cash left.
 function demoAmount(p) {
   const acct = state.demo?.account;
   const bankroll = state.bankroll?.amount;
@@ -341,20 +254,16 @@ function demoAmount(p) {
   return Math.max(1, Math.min(Math.round((p.size_usd / bankroll) * acct.value), Math.floor(acct.cash)));
 }
 
-const TYPE_ORDER = ["Strong", "Good", "Copy", "Early", "Pump", "Other"];
-// Shown next to the auto-trading checkboxes: what the 6-month backtest found (research/rising_backtest.py).
-const RISKY_NOTE = { Early: " · lost money in a 6-month backtest", Pump: " · lost money in a 6-month backtest",
-  Copy: " · new, +1.33% a trade in a 6,500-trade test" };
-const TYPE_HELP = { Strong: "3 of 3 checks", Good: "2 of 3 checks", Copy: "swing copies of one trader", Early: "rising-now early movers",
-  Pump: "pump rides", Other: "other" };
+// Copies first; other types are trades entered by hand or from strategies that were dropped.
+const TYPE_HELP = { Copy: "swing copies", Other: "entered by hand" };
 
 function resultsTable(byType, title) {
-  const rows = TYPE_ORDER.filter((t) => byType[t]);
+  const rows = Object.keys(byType).sort((a, b) => (b === "Copy") - (a === "Copy"));
   if (!rows.length) return "";
   return `<div class="card"><p class="card-title">${title}</p><div class="table-wrap"><table>
     <thead><tr><th>Type</th><th class="num">Trades</th><th class="num">Win rate</th><th class="num">Average after fees</th>
       <th class="num">Total</th><th class="num">BTC same days (avg)</th></tr></thead>
-    <tbody>${rows.map((t) => { const r = byType[t]; return `<tr><td>${t} <span class="muted small">${TYPE_HELP[t]}</span></td>
+    <tbody>${rows.map((t) => { const r = byType[t]; return `<tr><td>${esc(t)} <span class="muted small">${TYPE_HELP[t] || "earlier strategy, dropped"}</span></td>
       <td class="num">${r.trades}</td><td class="num">${Math.round(r.win_rate * 100)}%</td>
       <td class="num">${signed(r.avg_return, pct(r.avg_return, 2))}</td><td class="num">${signed(r.total_usd, money(r.total_usd))}</td>
       <td class="num">${r.avg_btc == null ? "–" : signed(r.avg_btc, pct(r.avg_btc, 2))}</td></tr>`; }).join("")}</tbody></table></div></div>`;
@@ -372,7 +281,7 @@ function drawDemoChart(history, start) {
   });
 }
 
-const AT_STATE = (on) => on ? "On: new picks of the ticked types are bought with demo money automatically." : "Off";
+const AT_STATE = (on) => on ? "On: new swing copies are bought with demo money automatically." : "Off";
 
 function renderAutotrade(cfg) {
   if ($("autotrade").querySelector(":focus")) return;  // don't redraw while you're editing
@@ -383,12 +292,9 @@ function renderAutotrade(cfg) {
           <span class="switch-label"><b>Automatic demo trading</b></span></label>
         <span class="muted small" id="at-state">${AT_STATE(cfg.enabled)}</span>
       </div>
-      <p class="muted small">Buys every new pick of the ticked types with demo money, right away, and sells each by its own plan
-        (stop-loss, target, trailing stop, sell signals, hold time), checked every 2 seconds. Only demo money is ever traded.</p>
-      <div class="chip-checks" role="group" aria-label="Pick types to buy automatically">
-        ${["Strong", "Good", "Copy", "Early", "Pump"].map((t) => `<label class="chip-check"><input type="checkbox" name="at-type" value="${t}" ${cfg.types.includes(t) ? "checked" : ""} />
-          <span><b>${t}</b><small>${TYPE_HELP[t]}${RISKY_NOTE[t] || ""}</small></span></label>`).join("")}
-      </div>
+      <p class="muted small">Buys every new swing copy with demo money, right away, and sells it when the copied trader sells,
+        at the safety stop or after 30 days (the price is checked every 2 seconds, the trader every minute). Only demo money
+        is ever traded.</p>
       <div class="at-limits">
         <label>At most <input type="number" id="at-max-open" min="1" max="50" value="${cfg.max_open}" /> open trades</label>
         <label>At most <input type="number" id="at-max-pct" min="5" max="100" step="5" value="${Math.round(cfg.max_invested_pct * 100)}" />% of the account invested</label>
@@ -399,7 +305,6 @@ function renderAutotrade(cfg) {
   $("at-save").addEventListener("click", async () => {
     const body = {
       enabled: $("at-enabled").checked,
-      types: [...document.querySelectorAll("input[name=at-type]:checked")].map((i) => i.value),
       max_open: +$("at-max-open").value,
       max_invested_pct: +$("at-max-pct").value / 100,
     };
@@ -421,7 +326,7 @@ function renderDemo(data) {
     state.demoChartKey = chartKey;
     $("demo-progress").innerHTML = `<div class="card"><div class="chart-head"><p class="card-title">Demo account over time</p>
         <div class="chart-legend"><span class="key demo">Demo account</span><span class="key btc">Holding BTC instead</span></div></div>
-        <div class="chart-wrap" id="demo-chart"></div></div>` + resultsTable(data.results_by_type, "Results by pick type");
+        <div class="chart-wrap" id="demo-chart"></div></div>` + resultsTable(data.results_by_type, "Results by type");
     drawDemoChart(data.history, a.start_balance);
   }
   const remove = (t) => `<button type="button" class="btn small ghost" data-act="remove" aria-label="Delete the ${esc(t.symbol)} demo trade">✕</button>`;
@@ -443,7 +348,7 @@ function renderDemo(data) {
     ? openRow(t, { tags: `<span class="tag">${t.auto ? "auto" : "demo"}</span>`, actions: sellNow(t) + remove(t) })
     : closedRow(t, { actions: remove(t) })).join("");
 
-  $("demo").innerHTML = panel + (rows || `<div class="empty">No demo trades yet. Turn on automatic demo trading above, or use “Demo buy” on any pick.</div>`);
+  $("demo").innerHTML = panel + (rows || `<div class="empty">No demo trades yet. Turn on automatic demo trading above, or use “Demo buy” on any swing copy.</div>`);
   applyDynamicStyles($("demo"));
   $("demo").querySelectorAll("[data-act=remove]").forEach((b) => b.addEventListener("click", async () => {
     const row = b.closest(".pos");
@@ -544,9 +449,9 @@ function renderPortfolio(data) {
 
   $("portfolio").innerHTML = panel + (rows || `<div class="empty">No positions yet. ${connected
     ? `Coins you buy on ${EX()} appear here automatically.`
-    : `Buy a pick and mark it with “I bought it”, or connect ${EX()} so the app tracks it for you.`}</div>`);
+    : `Buy a swing copy and mark it with “I bought it”, or connect ${EX()} so the app tracks it for you.`}</div>`);
   applyDynamicStyles($("portfolio"));
-  $("real-types").innerHTML = resultsTable(data.results_by_type || {}, "Results by pick type");
+  $("real-types").innerHTML = resultsTable(data.results_by_type || {}, "Results by type");
 
   $("portfolio").querySelectorAll("[data-act]").forEach((b) => b.addEventListener("click", async () => {
     const row = b.closest(".pos");
@@ -573,7 +478,7 @@ function renderPortfolio(data) {
     $("connect").innerHTML = `<div class="connect error"><b>${EX()} connection problem:</b> ${esc(s.account.error)}</div>`;
   } else if (s.bankroll.spot_empty) {
     const elsewhere = (st?.funding_usd || 0) + (st?.earn_usd || 0);
-    $("connect").innerHTML = `<div class="connect"><b>${EX()} connected.</b> Your trading account is empty, so picks are sized
+    $("connect").innerHTML = `<div class="connect"><b>${EX()} connected.</b> Your trading account is empty, so swing copies are sized
       from the fallback bankroll on the <a href="#settings">Settings</a> page.${elsewhere >= 10 ? ` You have ${money(elsewhere)} in your ${st.funding_usd ? "Funding account" : ""}${st.funding_usd && st.earn_usd ? " and " : ""}${st.earn_usd ? "Simple Earn" : ""}.
       To trade it, ${st.funding_usd ? "on OKX go to Assets → Transfer, from Funding to Trading" : "redeem it from Earn first"}.` : ""}</div>`;
   } else if (s.account.can_trade) {
@@ -654,23 +559,11 @@ async function loadAlerts() {
   store.set("notified", [...shown].slice(-500));
 }
 
-// ---------- Exiting + track record ----------
-function renderExiting(rows) {
-  $("exiting-section").hidden = !rows.length;
-  $("exiting").innerHTML = rows.map((e) => `
-    <div class="exit-item">${coinIcon(e.symbol)}<div><b>${esc(e.symbol)}</b><span class="muted small"><span class="down">${e.sellers} sold</span>
-      · ${e.buyers} bought · ${e.holders} still hold</span></div></div>`).join("");
-}
-
-
-const STRENGTH_HELP = { Strong: "picks, 3 of 3 checks", Good: "picks, 2 of 3 checks", Copy: "swing copies", Early: "rising-now early movers",
-  Pump: "pump rides" };
-
+// ---------- Track record ----------
 async function loadPerformance() {
   const perf = await api("/api/performance");
   const o = perf.overall;
   const kpi = (label, value, sub = "") => `<div class="kpi"><small>${label}</small><b>${value}</b>${sub ? `<span class="vs">${sub}</span>` : ""}</div>`;
-  const types = Object.entries(perf.by_strength).filter(([, x]) => x.trades);
   $("performance").innerHTML = `
     <div class="kpis">
       ${kpi("Closed trades", o.trades || 0, perf.since ? `since ${date(perf.since)}` : "none yet")}
@@ -678,26 +571,20 @@ async function loadPerformance() {
       ${kpi("Average per trade", o.trades ? signed(o.avg_net, pct(o.avg_net, 2)) : "–", "after fees")}
       ${kpi("BTC over the same days", o.avg_btc == null ? "–" : signed(o.avg_btc, pct(o.avg_btc, 2)), "average")}
     </div>
-    ${types.length ? `<div class="card"><p class="card-title">By type</p><div class="table-wrap"><table>
-      <thead><tr><th>Type</th><th class="num">Trades</th><th class="num">Won</th><th class="num">Average after fees</th><th class="num">BTC same days</th></tr></thead>
-      <tbody>${types.map(([k, x]) => `<tr><td><b>${esc(k)}</b> <span class="muted small">${STRENGTH_HELP[k] || ""}</span></td>
-        <td class="num">${x.trades}</td><td class="num">${Math.round(x.win_rate * 100)}%</td>
-        <td class="num">${signed(x.avg_net, pct(x.avg_net, 2))}</td><td class="num">${x.avg_btc == null ? "–" : signed(x.avg_btc, pct(x.avg_btc, 2))}</td></tr>`).join("")}
-      </tbody></table></div></div>` : ""}
     <div class="card"><p class="card-title">Being followed now</p>
       ${perf.open.length ? `<div class="exiting">${perf.open.map((t) => `<div class="exit-item">${coinIcon(t.symbol)}<div><b>${esc(t.symbol)}</b>
-        <span class="muted small">${esc(t.strength)} · ${signed(t.net_now, pct(t.net_now, 2))} now</span></div></div>`).join("")}</div>`
-        : `<p class="muted">Nothing open. A paper trade opens as soon as a coin becomes a pick or starts rising.</p>`}</div>
+        <span class="muted small">${signed(t.net_now, pct(t.net_now, 2))} now</span></div></div>`).join("")}</div>`
+        : `<p class="muted">Nothing open. A paper trade opens as soon as a coin becomes a swing copy.</p>`}</div>
     ${perf.recent.length ? `<div class="card"><p class="card-title">Recently closed</p><div class="table-wrap"><table>
-      <thead><tr><th>Coin</th><th>Type</th><th>Dates</th><th>Why it closed</th><th class="num">Result after fees</th><th class="num">BTC same days</th></tr></thead>
-      <tbody>${perf.recent.map((t) => `<tr><td>${esc(t.symbol)}</td><td>${esc(t.strength)}</td><td>${date(t.opened_at)} – ${date(t.closed_at)}</td>
+      <thead><tr><th>Coin</th><th>Dates</th><th>Why it closed</th><th class="num">Result after fees</th><th class="num">BTC same days</th></tr></thead>
+      <tbody>${perf.recent.map((t) => `<tr><td>${esc(t.symbol)}</td><td>${date(t.opened_at)} – ${date(t.closed_at)}</td>
         <td>${esc(REASON_TEXT[t.exit_reason] || t.exit_reason)}</td><td class="num">${signed(t.net_return, pct(t.net_return, 2))}</td>
         <td class="num">${t.btc_return == null ? "–" : signed(t.btc_return, pct(t.btc_return, 2))}</td></tr>`).join("")}</tbody></table></div></div>`
-      : `<div class="empty">No trades have closed yet. Results appear when a trade hits its stop, its target, a sell signal or the end of its hold time.</div>`}`;
+      : `<div class="empty">No trades have closed yet. Results appear when the copied trader sells, a trade hits its safety stop, or 30 days pass.</div>`}`;
 }
 
 // ---------- Status ----------
-// (The bankroll used to size picks when OKX isn't connected is set on the Settings page.)
+// (The bankroll used to size swing copies when OKX isn't connected is set on the Settings page.)
 
 // Screen readers hear the status only when it changes kind (updating → live → offline), not every "updated 2 min ago".
 let lastStatusKind = "";
@@ -751,20 +638,18 @@ async function poll() {
 async function loadAll(force = false) {
   try {
     if (!state.status) await poll();
-    const [picks, portfolio, account, demo, rising] = await Promise.all([
-      api("/api/picks"), api("/api/portfolio"), api("/api/account"), api("/api/demo"), api("/api/movers")]);
+    const [copies, portfolio, account, demo] = await Promise.all([
+      api("/api/copies"), api("/api/portfolio"), api("/api/account"), api("/api/demo")]);
     state.account = account;
     state.demo = demo;
     state.portfolio = portfolio;
-    renderPicks(picks);
-    renderRising(rising);
+    renderCopies(copies);
     if (force || !busyInside($("demo-view"))) renderDemo(demo);
-    renderExiting(picks.exiting);
     if (force || !busyInside($("real-view"))) renderPortfolio(portfolio);
     await Promise.all([loadAlerts(), loadPerformance()]);
     $("load-error").hidden = true;
   } catch (e) {
-    // Shown above every page, not only on Picks, so it's seen wherever you are.
+    // Shown above every page, so it's seen wherever you are.
     $("load-error").hidden = false;
     $("load-error").querySelector("span").textContent = `Couldn’t load the latest data: ${e.message} It tries again at the next update.`;
   }
@@ -908,11 +793,12 @@ if ("Notification" in window && Notification.permission === "default") {
 }
 
 // ---------- Menu ----------
-const PAGES = ["bot", "picks", "rising", "portfolio", "record", "settings", "admin", "how"];
+const PAGES = ["bot", "copies", "portfolio", "record", "settings", "admin", "how"];
 const PAGE_LOADERS = {};  // settings.js and admin.js register loaders here; they get the part after "/" (e.g. #admin/users)
 function go(route) {
   let [page, sub] = String(route || "").split("/");
   if (page === "demo") page = "portfolio";
+  if (page === "picks" || page === "rising") page = "copies";  // old bookmarks
   if (!PAGES.includes(page)) { page = "bot"; sub = undefined; }
   const hash = sub ? `#${page}/${sub}` : `#${page}`;
   if (location.hash !== hash) history.replaceState(null, "", hash);
@@ -938,7 +824,6 @@ poll().then((s) => {
   loadAll();
 });
 setInterval(poll, 5000);
-setInterval(() => loadRising().catch(() => {}), 15000);
 setInterval(loadAlerts, 30000);
 // Live: re-draw open positions and demo trades every 5 seconds while any are running.
 setInterval(() => {

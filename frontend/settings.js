@@ -48,8 +48,8 @@ async function loadSettings() {
     </div>
 
     <div class="card">
-      <h3>Bankroll for sizing picks</h3>
-      <p class="muted">How much money each pick’s suggested amount is based on. ${state.bankroll?.source === "exchange"
+      <h3>Bankroll for sizing swing copies</h3>
+      <p class="muted">How much money each swing copy’s suggested amount is based on (5% of it per copy). ${state.bankroll?.source === "exchange"
         ? `Right now it’s your OKX trading balance (<b>${money(state.bankroll.amount, 0)}</b>), so this number is only used if OKX is disconnected or your trading account is empty.`
         : `OKX isn’t connected (or its trading account is empty), so this number is used.`}
         The demo account always uses its own balance.</p>
@@ -62,7 +62,7 @@ async function loadSettings() {
 
     <div class="card">
       <h3>Your OKX fees</h3>
-      <p class="muted">Used for every pick’s win/loss after fees, for demo trades and for results. Market orders and
+      <p class="muted">Used for every swing copy’s result after fees, for demo trades and for the trend bot. Market orders and
         triggered stops pay the taker fee. Find yours on OKX under Profile → Fee rates (spot).</p>
       <form id="fees-form" class="form inline">
         <label>Maker % <input type="number" name="maker" step="0.001" min="0" max="1"

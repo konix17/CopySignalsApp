@@ -6,7 +6,7 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from app import autotrade, db, portfolio, replay, security, users
+from app import autotrade, db, portfolio, security, users
 from app.config import Settings
 from app.logs import audit, redact
 from app.main import create_app
@@ -41,7 +41,7 @@ def client_for(app, username=None, password=None) -> TestClient:
 def test_everything_requires_login(app_and_conn):
     app, _ = app_and_conn
     c = client_for(app)
-    for path in ("/api/picks", "/api/portfolio", "/api/demo", "/api/settings", "/api/admin/users", "/api/status"):
+    for path in ("/api/copies", "/api/portfolio", "/api/demo", "/api/settings", "/api/admin/users", "/api/status"):
         assert c.get(path).status_code == 401, path
     r = c.get("/", follow_redirects=False)
     assert r.status_code == 303 and r.headers["location"] == "/login.html"
@@ -51,10 +51,8 @@ def test_everything_requires_login(app_and_conn):
 def test_admin_pages_are_admin_only(app_and_conn):
     app, _ = app_and_conn
     alice = client_for(app, "alice", USER_PW)
-    for path in ("/api/admin/users", "/api/admin/audit", "/api/admin/status", "/api/admin/sessions", "/api/admin/settings",
-                 "/api/admin/lab"):
+    for path in ("/api/admin/users", "/api/admin/audit", "/api/admin/status", "/api/admin/sessions", "/api/admin/settings"):
         assert alice.get(path).status_code == 403, path
-    assert alice.post("/api/admin/lab").status_code == 403
     admin = client_for(app, "admin1", ADMIN_PW)
     assert admin.get("/api/admin/users").status_code == 200
 
@@ -317,19 +315,19 @@ def test_admin_settings_are_validated(app_and_conn):
     assert admin.put("/api/admin/settings", json={"values": {"default_demo_balance": 5000}}).status_code == 200
 
 
-def test_admin_runs_the_strategy_lab(app_and_conn, monkeypatch):
-    app, conn = app_and_conn
+def test_admin_status_counts_copies(app_and_conn):
+    app, _ = app_and_conn
+    body = client_for(app, "admin1", ADMIN_PW).get("/api/admin/status").json()
+    assert body["stream"]["connected"] is False
+    assert body["counts"]["tracked_copies_open"] == 0 and body["counts"]["tracked_copies_closed"] == 0
+    assert client_for(app, "admin1", ADMIN_PW).get("/api/admin/lab").status_code in (404, 405)  # the lab was removed
 
-    async def fake_run(conn, region="eea", now=None):
-        return {"now": 1, "rules": {}, "missing": []}
 
-    monkeypatch.setattr(replay, "run", fake_run)
-    admin = client_for(app, "admin1", ADMIN_PW)
-    assert admin.get("/api/admin/lab").json() == {"running": False, "result": None}
-    assert admin.post("/api/admin/lab").json()["result"]["now"] == 1
-    assert admin.get("/api/admin/lab").json()["result"] == {"now": 1, "rules": {}, "missing": []}
-    assert conn.execute("SELECT 1 FROM audit_log WHERE action = 'admin.lab_run'").fetchone()
-    assert admin.get("/api/admin/status").json()["stream"]["connected"] is False
+def test_copies_page(app_and_conn):
+    app, _ = app_and_conn
+    body = client_for(app, "alice", USER_PW).get("/api/copies").json()
+    assert body["copies"] == [] and "risk_on" in body["regime"] and body["bankroll"]["amount"] > 0
+    assert client_for(app, "alice", USER_PW).get("/api/movers").status_code in (404, 405)  # rising now was removed
 
 
 def test_trend_bot_per_user_demo_account(app_and_conn):
@@ -351,11 +349,12 @@ def test_trend_bot_per_user_demo_account(app_and_conn):
 
 # --- demo mode and automatic demo trading -----------------------------------------------------------------
 
-def _pick(symbol="SOL", strength="Strong", size=100.0, price=100.0):
-    return Pick(market_key=f"perp:{symbol}", symbol=symbol, pair=f"{symbol}-USDT", strength=strength, score=1.0,
-                checks=[Check("x", True, "y")], price=price, stop_price=price * 0.9, target_price=price * 1.2,
-                stop_pct=-0.1, target_pct=0.2, cost_pct=0.007, hold_days=7, hold_basis="estimated", size_usd=size,
-                net_win_usd=0, net_loss_usd=0, n_traders=5, buyers_24h=0, sellers_24h=0, features={"agreement": 0.9})
+def _pick(symbol="SOL", size=100.0, price=100.0, score=1.0):
+    """A swing copy."""
+    return Pick(market_key=f"perp:{symbol}", symbol=symbol, pair=f"{symbol}-USDT", strength="Copy", score=score,
+                checks=[Check("x", True, "y")], price=price, stop_price=price * 0.75, target_price=price * 2,
+                stop_pct=-0.25, target_pct=1.0, cost_pct=0.007, hold_days=30, hold_basis="estimated", size_usd=size,
+                net_win_usd=0, net_loss_usd=0, n_traders=1, buyers_24h=0, sellers_24h=0, features={"copy_log_id": 7})
 
 
 def test_demo_mode_switch(app_and_conn):
@@ -369,15 +368,18 @@ def test_demo_mode_switch(app_and_conn):
 def test_autotrade_only_for_users_who_turned_it_on_and_within_limits(app_and_conn):
     app, conn = app_and_conn
     alice = users.by_name(conn, "alice")["id"]
+    # Saved before pick types were removed: the old "types" list is ignored.
     users.set_setting(conn, alice, "autotrade", {"enabled": True, "types": ["Strong", "Pump"], "max_open": 2,
                                                   "max_invested_pct": 0.5})
-    picks = [_pick("SOL"), _pick("ETH"), _pick("XRP"), _pick("DOGE", strength="Good")]
+    assert autotrade.config(conn, alice) == {"enabled": True, "max_open": 2, "max_invested_pct": 0.5}
+    picks = [_pick("XRP", score=0.5), _pick("SOL", score=3), _pick("ETH", score=2)]
     bought = autotrade.run(conn, picks, reference_bankroll=1000, markets={}, now=100)
-    assert [b["symbol"] for b in bought] == ["SOL", "ETH"]  # max 2 open, Good not enabled, admin didn't opt in
-    rows = conn.execute("SELECT user_id, source, auto, size_usd, strength, features FROM my_positions").fetchall()
+    assert [b["symbol"] for b in bought] == ["SOL", "ETH"]  # best traders first, max 2 open, admin didn't opt in
+    rows = conn.execute("SELECT user_id, source, auto, size_usd, strength, style, features FROM my_positions").fetchall()
     assert {r["user_id"] for r in rows} == {alice} and all(r["source"] == "demo" and r["auto"] == 1 for r in rows)
     assert rows[0]["size_usd"] == pytest.approx(1000)  # 10% of the $10k demo account, like 100/1000 of the reference
-    assert json.loads(rows[0]["features"]) == {"agreement": 0.9}
+    assert rows[0]["strength"] == "Copy" and rows[0]["style"] == "copy"
+    assert json.loads(rows[0]["features"]) == {"copy_log_id": 7}
     assert autotrade.run(conn, picks, 1000, {}, now=200) == []  # already at max open / already held
     assert conn.execute("SELECT COUNT(*) FROM audit_log WHERE action = 'demo.auto_buy'").fetchone()[0] == 2
 
@@ -385,8 +387,7 @@ def test_autotrade_only_for_users_who_turned_it_on_and_within_limits(app_and_con
 def test_autotrade_respects_invested_limit(app_and_conn):
     _, conn = app_and_conn
     alice = users.by_name(conn, "alice")["id"]
-    users.set_setting(conn, alice, "autotrade", {"enabled": True, "types": ["Strong"], "max_open": 10,
-                                                  "max_invested_pct": 0.15})
+    users.set_setting(conn, alice, "autotrade", {"enabled": True, "max_open": 10, "max_invested_pct": 0.15})
     bought = autotrade.run(conn, [_pick("SOL"), _pick("ETH")], 1000, {}, now=100)
     total = sum(b["size_usd"] for b in bought)
     assert total <= 0.15 * 10_000 + 0.01 and len(bought) == 2 and bought[1]["size_usd"] == pytest.approx(500)
@@ -441,7 +442,7 @@ def test_user_fees_are_used_for_costs(app_and_conn):
 def test_autotrade_costs_use_each_users_fee(app_and_conn):
     _, conn = app_and_conn
     alice = users.by_name(conn, "alice")["id"]
-    users.set_setting(conn, alice, "autotrade", {"enabled": True, "types": ["Strong"], "max_open": 5, "max_invested_pct": 1})
+    users.set_setting(conn, alice, "autotrade", {"enabled": True, "max_open": 5, "max_invested_pct": 1})
     p = _pick("SOL")  # costed for a 0.10% reference fee: 0.007 round trip
     autotrade.run(conn, [p], 1000, {}, now=1, reference_fee=0.001, fee_for=lambda uid: 0.002)
     cost = conn.execute("SELECT cost_pct FROM my_positions").fetchone()[0]
@@ -455,6 +456,6 @@ def test_temporary_password_must_be_changed_first(app_and_conn):
         users.create(conn, "someone", "short1!")  # without temporary the rules apply
     c = client_for(app, "firstadmin", "short1!")
     assert c.get("/api/status").json()["user"]["must_change_password"] is True
-    assert c.get("/api/picks").status_code == 403 and c.get("/api/admin/users").status_code == 403
+    assert c.get("/api/copies").status_code == 403 and c.get("/api/admin/users").status_code == 403
     assert c.post("/api/auth/password", json={"current": "short1!", "new": "a much better password 1"}).status_code == 200
     assert c.get("/api/admin/users").status_code == 200

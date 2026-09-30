@@ -6,7 +6,6 @@
     ../.venv/bin/python -m app.manage set-password <username>
     ../.venv/bin/python -m app.manage import-okx-env <username>    (moves OKX_* keys from .env into the account)
     ../.venv/bin/python -m app.manage list-users
-    ../.venv/bin/python -m app.manage replay        (replays the paper trades under other exit rules; see replay.py)
     ../.venv/bin/python -m app.manage backtest      (updates price history, then backtests every strategy; backtest.py)
 """
 
@@ -15,7 +14,7 @@ import getpass
 import sys
 import time
 
-from . import backtest, db, history, replay, trendbot, users
+from . import backtest, db, history, trendbot, users
 from .config import ROOT, settings
 from .logs import audit
 from .security import SecretBox
@@ -100,10 +99,6 @@ def main(argv: list[str]) -> None:
         summary = trendbot.backtest_summary(okx, funding=history.load_funding(hist))
         print("\nThe trend bot on OKX prices:")
         print(backtest.format_table([summary["strategy"], *summary["hold"].values()]))
-    elif cmd == "replay" and not args:
-        result = asyncio.run(replay.run(conn, settings.okx_region))
-        replay.save(conn, result)
-        print(replay.format_report(result))
     else:
         sys.exit(__doc__)
 
